@@ -28,7 +28,8 @@ WORKDIR /app
 COPY . /app
 
 RUN uv sync --frozen
+RUN mkdir -p /app/data
 
 # ENV PATH="/app/.venv/bin:$PATH"
 
-CMD ["uv", "run", "env_setup.py"]
+CMD ["uv", "run", "collect_data.py"]
