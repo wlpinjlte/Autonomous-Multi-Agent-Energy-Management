@@ -1,0 +1,5 @@
+services:
+  data-collection:
+    build: .
+    volumes:
+      - ../data:/app/data

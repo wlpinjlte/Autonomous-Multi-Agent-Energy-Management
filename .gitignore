@@ -1,16 +1,1 @@
-.venv/
-env/
-venv/
-
-__pycache__/
-*.py[cod]
-*$py.class
-
-*.log
-.DS_Store
-
-*.pt
-*.pth
-*.zip
-dataset/
 data/

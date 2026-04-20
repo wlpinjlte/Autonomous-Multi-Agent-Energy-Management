@@ -1,0 +1,11 @@
+[project]
+name = "lstm-training-env"
+version = "0.1.0"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy",
+    "torch",
+    "matplotlib",
+    "sktime"
+]
