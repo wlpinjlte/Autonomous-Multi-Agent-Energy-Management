@@ -117,7 +117,7 @@ def main():
     model = SAC("MlpPolicy", env, verbose=1, tensorboard_log="./sac_hvac_tensorboard/")
     model.learn(total_timesteps=70000, log_interval=4)
 
-    model.save("sac_hvac_agent_with_lstm")
+    model.save("data/sac_hvac_agent_with_lstm")
     print("Trening zakończony!")
 
 if __name__ == "__main__":
