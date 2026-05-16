@@ -93,33 +93,55 @@ class DualPredictorObservationWrapper(gym.Wrapper):
 class CustomRewardWrapper(gym.Wrapper):
     def __init__(self, env):
         super().__init__(env)
+        self.prev_action = None
+
+    def reset(self, **kwargs):
+        self.prev_action = None
+        return self.env.reset(**kwargs)
 
     def step(self, action):
         obs, reward, terminated, truncated, info = self.env.step(action)
         
-        energy_cost = float(np.sum(np.abs(action)))
+        energy_cost = abs(info.get('reward_energy', float(obs[15])))
+
+        current_temp_norm = float(obs[8])
+        deadband = 0.2
         
-        current_temp_norm = float(obs[2])
-        comfort_now_penalty_raw = current_temp_norm ** 2
-        
+        if abs(current_temp_norm) <= deadband:
+            comfort_now_penalty_raw = 0.0
+        else:
+            comfort_now_penalty_raw = np.exp(abs(current_temp_norm) - deadband) - 1.0
+            
         pred_occ_norm = float(obs[-2])
         future_temp_norm = float(obs[-1])
-        comfort_future_penalty_raw = future_temp_norm ** 2
+        
+        if abs(future_temp_norm) <= deadband:
+            comfort_future_penalty_raw = 0.0
+        else:
+            comfort_future_penalty_raw = np.exp(abs(future_temp_norm) - deadband) - 1.0
 
         occ_weight = np.clip((pred_occ_norm + 1.0) / 2.0, 0.0, 1.0)
 
         comfort_now_penalty = comfort_now_penalty_raw * occ_weight
         comfort_future_penalty = comfort_future_penalty_raw * occ_weight
         
+        if self.prev_action is not None:
+            action_smoothing_penalty = float(np.sum(np.abs(action - self.prev_action)))
+        else:
+            action_smoothing_penalty = 0.0
+        self.prev_action = action.copy()
+        
         w_energy = 0.40
         w_comfort_now = 0.40
-        w_comfort_future = 0.20
+        w_comfort_future = 0.10
+        w_smoothing = 0.10
         
-        custom_reward = - (w_energy * energy_cost + w_comfort_now * comfort_now_penalty + w_comfort_future * comfort_future_penalty)
+        custom_reward = - (w_energy * energy_cost + w_comfort_now * comfort_now_penalty + w_comfort_future * comfort_future_penalty + w_smoothing * action_smoothing_penalty)
        
         info['custom_energy_cost'] = energy_cost
         info['custom_comfort_penalty'] = comfort_now_penalty
         info['custom_future_penalty'] = comfort_future_penalty
+        info['custom_smoothing_penalty'] = action_smoothing_penalty
 
         return obs, custom_reward, terminated, truncated, info
 
