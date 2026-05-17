@@ -138,9 +138,9 @@ class CustomRewardWrapper(gym.Wrapper):
             action_smoothing_penalty = 0.0
         self.prev_action = action.copy()
         
-        w_energy = 0.40
-        w_comfort_now = 0.40
-        w_comfort_future = 0.10
+        w_energy = 0.65
+        w_comfort_now = 0.20
+        w_comfort_future = 0.05
         w_smoothing = 0.10
         
         custom_reward = - (w_energy * energy_cost + w_comfort_now * comfort_now_penalty + w_comfort_future * comfort_future_penalty + w_smoothing * action_smoothing_penalty)
