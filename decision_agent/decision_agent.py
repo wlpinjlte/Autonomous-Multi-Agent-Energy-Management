@@ -125,6 +125,17 @@ class CustomRewardWrapper(gym.Wrapper):
         comfort_now_penalty = comfort_now_penalty_raw * occ_weight
         comfort_future_penalty = comfort_future_penalty_raw * occ_weight
         
+        occupant_count_norm = float(obs[13])
+        if occupant_count_norm <= -0.9:
+            wasted_energy_penalty = energy_cost
+        else:
+            wasted_energy_penalty = 0.0
+            
+        if action[0] > action[1]:
+            action_conflict_penalty = float(action[0] - action[1]) * 10.0
+        else:
+            action_conflict_penalty = 0.0
+        
         if self.prev_action is not None:
             action_smoothing_penalty = float(np.sum(np.abs(action - self.prev_action)))
         else:
@@ -132,16 +143,27 @@ class CustomRewardWrapper(gym.Wrapper):
         self.prev_action = action.copy()
         
         w_energy = 0.40
-        w_comfort_now = 0.40
-        w_comfort_future = 0.10
+        w_comfort_now = 0.35
+        w_comfort_future = 0.05
         w_smoothing = 0.10
+        w_wasted = 0.40
+        w_conflict = 0.10
         
-        custom_reward = - (w_energy * energy_cost + w_comfort_now * comfort_now_penalty + w_comfort_future * comfort_future_penalty + w_smoothing * action_smoothing_penalty)
+        custom_reward = - (
+            w_energy * energy_cost + 
+            w_comfort_now * comfort_now_penalty + 
+            w_comfort_future * comfort_future_penalty + 
+            w_smoothing * action_smoothing_penalty +
+            w_wasted * wasted_energy_penalty +
+            w_conflict * action_conflict_penalty
+        )
        
         info['custom_energy_cost'] = energy_cost
         info['custom_comfort_penalty'] = comfort_now_penalty
         info['custom_future_penalty'] = comfort_future_penalty
         info['custom_smoothing_penalty'] = action_smoothing_penalty
+        info['wasted_energy_penalty'] = wasted_energy_penalty
+        info['action_conflict_penalty'] = action_conflict_penalty
 
         return obs, custom_reward, terminated, truncated, info
 
