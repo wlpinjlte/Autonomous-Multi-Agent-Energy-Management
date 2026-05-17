@@ -11,6 +11,12 @@ from gymnasium.wrappers import TransformObservation
 from gymnasium.spaces import Box
 from stable_baselines3 import SAC
 import matplotlib.pyplot as plt
+from enum import Enum
+
+class ControlMode(Enum):
+    SAC = "SAC"
+    RBC_STANDARD = "RBC_STANDARD"
+    RBC_OCCUPANCY = "RBC_OCCUPANCY"
 
 class HVACPredictorLSTM(nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim=1, num_layers=2):
@@ -146,7 +152,7 @@ class CustomRewardWrapper(gym.Wrapper):
 
         return obs, custom_reward, terminated, truncated, info
 
-def run_episode(env, model=None, is_rbc=False):
+def run_episode(env, model=None, mode=ControlMode.SAC):
     obs, info = env.reset()
     terminated = False
     truncated = False
@@ -159,8 +165,15 @@ def run_episode(env, model=None, is_rbc=False):
     }
     
     while not (terminated or truncated):
-        if is_rbc:
+        if mode == ControlMode.RBC_STANDARD:
             action = np.array([0.6, -0.6], dtype=np.float32)
+            action = np.clip(action, env.action_space.low, env.action_space.high)
+        elif mode == ControlMode.RBC_OCCUPANCY:
+            occupant_count_norm = float(obs[13])
+            if occupant_count_norm == -1.0:
+                action = np.array([0.6, -0.6], dtype=np.float32)
+            else:
+                action = np.array([-1.0, 1.0], dtype=np.float32)
             action = np.clip(action, env.action_space.low, env.action_space.high)
         else:
             action, _ = model.predict(obs, deterministic=True)
@@ -190,45 +203,65 @@ def main():
     print("Ładowanie wytrenowanego agenta SAC...")
     model = SAC.load("data/sac_hvac_agent_with_lstm", env=env)
 
-    print("\n[1/2] Ewaluacja modelu SAC + LSTM (Proszę czekać, symulacja roczna)...")
-    sac_history = run_episode(env, model=model, is_rbc=False)
+    print("\n[1/3] Ewaluacja modelu SAC + LSTM (Proszę czekać, symulacja roczna)...")
+    sac_history = run_episode(env, model=model, mode=ControlMode.SAC)
 
-    print("\n[2/2] Ewaluacja tradycyjnego termostatu RBC (Baseline)...")
-    rbc_history = run_episode(env, is_rbc=True)
+    print("\n[2/3] Ewaluacja tradycyjnego termostatu RBC (Standard)...")
+    rbc_history = run_episode(env, mode=ControlMode.RBC_STANDARD)
+
+    print("\n[3/3] Ewaluacja termostatu RBC (Zależny od obecności)...")
+    rbc_occ_history = run_episode(env, mode=ControlMode.RBC_OCCUPANCY)
 
     env.close()
 
     sac_total_energy = np.sum(sac_history['energy'])
     rbc_total_energy = np.sum(rbc_history['energy'])
+    rbc_occ_total_energy = np.sum(rbc_occ_history['energy'])
     
     sac_total_penalty = np.sum(sac_history['comfort_penalty'])
     rbc_total_penalty = np.sum(rbc_history['comfort_penalty'])
+    rbc_occ_total_penalty = np.sum(rbc_occ_history['comfort_penalty'])
 
     sac_mean_reward = np.mean(sac_history['reward'])
     rbc_mean_reward = np.mean(rbc_history['reward'])
+    rbc_occ_mean_reward = np.mean(rbc_occ_history['reward'])
 
     os.makedirs('data', exist_ok=True)
     with open('data/rl_vs_baseline_metrics.txt', 'w', encoding='utf-8') as f:
-        f.write("--- PORÓWNANIE: SAC+LSTM vs Tradycyjny Termostat (RBC) ---\n\n")
+        f.write("--- PORÓWNANIE: SAC+LSTM vs Tradycyjny Termostat (RBC) vs RBC Occupancy ---\n\n")
         f.write("1. Skumulowany koszt energii (Mniej = Lepiej):\n")
         f.write(f"   SAC Agent: {sac_total_energy:.2f}\n")
-        f.write(f"   RBC Baseline: {rbc_total_energy:.2f}\n")
-        f.write(f"   Zysk: {((rbc_total_energy - sac_total_energy) / rbc_total_energy * 100):.2f}%\n\n")
+        f.write(f"   RBC Standard: {rbc_total_energy:.2f}\n")
+        f.write(f"   RBC Occupancy: {rbc_occ_total_energy:.2f}\n")
+        if rbc_total_energy != 0:
+            f.write(f"   Zysk (SAC vs Standard): {((rbc_total_energy - sac_total_energy) / rbc_total_energy * 100):.2f}%\n")
+        if rbc_occ_total_energy != 0:
+            f.write(f"   Zysk (SAC vs Occupancy): {((rbc_occ_total_energy - sac_total_energy) / rbc_occ_total_energy * 100):.2f}%\n\n")
+        else:
+            f.write("\n")
         
         f.write("2. Skumulowana kara za dyskomfort cieplny (Mniej = Lepiej):\n")
         f.write(f"   SAC Agent: {sac_total_penalty:.2f}\n")
-        f.write(f"   RBC Baseline: {rbc_total_penalty:.2f}\n")
-        f.write(f"   Zysk: {((rbc_total_penalty - sac_total_penalty) / rbc_total_penalty * 100):.2f}%\n\n")
+        f.write(f"   RBC Standard: {rbc_total_penalty:.2f}\n")
+        f.write(f"   RBC Occupancy: {rbc_occ_total_penalty:.2f}\n")
+        if rbc_total_penalty != 0:
+            f.write(f"   Zysk (SAC vs Standard): {((rbc_total_penalty - sac_total_penalty) / rbc_total_penalty * 100):.2f}%\n")
+        if rbc_occ_total_penalty != 0:
+            f.write(f"   Zysk (SAC vs Occupancy): {((rbc_occ_total_penalty - sac_total_penalty) / rbc_occ_total_penalty * 100):.2f}%\n\n")
+        else:
+            f.write("\n")
         
         f.write("3. Średnia nagroda na krok (Więcej = Lepiej):\n")
         f.write(f"   SAC Agent: {sac_mean_reward:.4f}\n")
-        f.write(f"   RBC Baseline: {rbc_mean_reward:.4f}\n")
+        f.write(f"   RBC Standard: {rbc_mean_reward:.4f}\n")
+        f.write(f"   RBC Occupancy: {rbc_occ_mean_reward:.4f}\n")
 
     plt.figure(figsize=(16, 10))
 
     plt.subplot(2, 2, 1)
     plt.plot(np.cumsum(sac_history['energy']), label="SAC + LSTM", color="royalblue", linewidth=2)
     plt.plot(np.cumsum(rbc_history['energy']), label="Termostat (RBC)", color="crimson", linestyle="--", linewidth=2)
+    plt.plot(np.cumsum(rbc_occ_history['energy']), label="Termostat (RBC Occupancy)", color="green", linestyle="--", linewidth=2)
     plt.title("Skumulowane Zużycie Energii (Wysterowanie HVAC)")
     plt.xlabel("Kroki symulacji (czas)")
     plt.ylabel("Jednostki energii")
@@ -238,6 +271,7 @@ def main():
     plt.subplot(2, 2, 2)
     plt.plot(np.cumsum(sac_history['comfort_penalty']), label="SAC + LSTM", color="royalblue", linewidth=2)
     plt.plot(np.cumsum(rbc_history['comfort_penalty']), label="Termostat (RBC)", color="crimson", linestyle="--", linewidth=2)
+    plt.plot(np.cumsum(rbc_occ_history['comfort_penalty']), label="Termostat (RBC Occupancy)", color="green", linestyle="--", linewidth=2)
     plt.title("Skumulowana Kara za Brak Komfortu Cieplnego")
     plt.xlabel("Kroki symulacji (czas)")
     plt.ylabel("Skumulowana kara (MSE)")
@@ -247,6 +281,7 @@ def main():
     plt.subplot(2, 2, 3)
     plt.hist(sac_history['temp'], bins=50, alpha=0.6, label="SAC + LSTM", color="royalblue", density=True)
     plt.hist(rbc_history['temp'], bins=50, alpha=0.5, label="Termostat (RBC)", color="crimson", density=True)
+    plt.hist(rbc_occ_history['temp'], bins=50, alpha=0.5, label="Termostat (RBC Occupancy)", color="green", density=True)
     plt.title("Rozkład Znormalizowanych Temperatur w Pomieszczeniu")
     plt.xlabel("Znormalizowana temperatura (0 = ideał)")
     plt.ylabel("Gęstość")
@@ -257,6 +292,7 @@ def main():
     plt.subplot(2, 2, 4)
     plt.plot(sac_history['temp'][:plot_limit], label="SAC + LSTM", color="royalblue", alpha=0.9, linewidth=1.5)
     plt.plot(rbc_history['temp'][:plot_limit], label="Termostat (RBC)", color="crimson", linestyle="--", alpha=0.8, linewidth=1.5)
+    plt.plot(rbc_occ_history['temp'][:plot_limit], label="Termostat (RBC Occupancy)", color="green", linestyle="--", alpha=0.8, linewidth=1.5)
     plt.title(f"Profil Temperatur Wewnętrznych (Pierwsze {plot_limit} kroków)")
     plt.xlabel("Kroki symulacji")
     plt.ylabel("Znormalizowana temperatura")
