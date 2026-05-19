@@ -22,11 +22,9 @@ class OccupancyPredictorMLP(nn.Module):
         return self.net(x)
 
 class OccDataset(Dataset):
-    def __init__(self, npz_file):
-        print(f"Ładowanie danych z {npz_file} dla predyktora zajętości...")
-        data = np.load(npz_file)
-        self.states = data['states']
-        self.next_states = data['next_states']
+    def __init__(self, states, next_states):
+        self.states = states
+        self.next_states = next_states
         
         self.inputs = self.states
         self.input_dim = self.inputs.shape[1]
@@ -51,10 +49,24 @@ def train_occupancy_model():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Urządzenie docelowe: {device}")
     
-    dataset = OccDataset('data/lstm_dataset.npz')
-    dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
+    print(f"Ładowanie danych z data/lstm_dataset.npz dla predyktora zajętości...")
+    data = np.load('data/lstm_dataset.npz')
+    states = data['states']
+    next_states = data['next_states']
+    
+    # Chronological train/test split (80% / 20%)
+    split_idx = int(len(states) * 0.8)
+    
+    train_states, test_states = states[:split_idx], states[split_idx:]
+    train_next_states, test_next_states = next_states[:split_idx], next_states[split_idx:]
 
-    model = OccupancyPredictorMLP(input_dim=dataset.input_dim).to(device)
+    train_dataset = OccDataset(train_states, train_next_states)
+    test_dataset = OccDataset(test_states, test_next_states)
+    
+    dataloader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+    eval_dataloader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
+
+    model = OccupancyPredictorMLP(input_dim=train_dataset.input_dim).to(device)
     criterion = nn.MSELoss() 
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
@@ -83,7 +95,7 @@ def train_occupancy_model():
     print("\nEwaluacja modelu...")
     model.eval()
     
-    eval_dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=False)
+    # eval_dataloader is already defined using test_dataset
     
     all_y_true = []
     all_y_mlp = []
