@@ -23,12 +23,10 @@ class HVACPredictorLSTM(nn.Module):
         return pred
 
 class BuildingDataset(Dataset):
-    def __init__(self, npz_file, seq_length=5):
-        print(f"Loading data from {npz_file}...")
-        data = np.load(npz_file)
-        self.states = data['states']
-        self.actions = data['actions']
-        self.next_states = data['next_states']
+    def __init__(self, states, actions, next_states, seq_length=5):
+        self.states = states
+        self.actions = actions
+        self.next_states = next_states
         self.seq_length = seq_length
 
         self.inputs = np.concatenate((self.states, self.actions), axis=1)
@@ -61,11 +59,27 @@ def train_model():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Starting training on device: {device}")
 
-    dataset = BuildingDataset('data/lstm_dataset.npz', seq_length=SEQ_LENGTH)
-    dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
+    print("Loading data from data/lstm_dataset.npz...")
+    data = np.load('data/lstm_dataset.npz')
+    states = data['states']
+    actions = data['actions']
+    next_states = data['next_states']
+    
+    # Chronological train/test split (80% / 20%)
+    split_idx = int(len(states) * 0.8)
+    
+    train_states, test_states = states[:split_idx], states[split_idx:]
+    train_actions, test_actions = actions[:split_idx], actions[split_idx:]
+    train_next_states, test_next_states = next_states[:split_idx], next_states[split_idx:]
+
+    train_dataset = BuildingDataset(train_states, train_actions, train_next_states, seq_length=SEQ_LENGTH)
+    test_dataset = BuildingDataset(test_states, test_actions, test_next_states, seq_length=SEQ_LENGTH)
+    
+    dataloader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+    eval_dataloader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
 
     model = HVACPredictorLSTM(
-        input_dim=dataset.input_dim, 
+        input_dim=train_dataset.input_dim, 
         hidden_dim=HIDDEN_DIM, 
         num_layers=NUM_LAYERS
     ).to(device)
@@ -103,7 +117,7 @@ def train_model():
     print("\nEvaluating model...")
     model.eval()
     
-    eval_dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=False)
+    # Use eval_dataloader which has test data
     
     all_y_true = []
     all_y_lstm = []
