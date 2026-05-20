@@ -94,78 +94,125 @@ class CustomRewardWrapper(gym.Wrapper):
     def __init__(self, env):
         super().__init__(env)
         self.prev_action = None
+        
+        try:
+            obs_vars = self.env.get_wrapper_attr('observation_variables')
+            self.temp_idx = obs_vars.index('air_temperature')
+            self.occ_idx = obs_vars.index('people_occupant')
+            self.energy_idx = obs_vars.index('HVAC_electricity_demand_rate')
+        except (AttributeError, ValueError):
+            self.temp_idx = 12
+            self.occ_idx = 14
+            self.energy_idx = 18
 
     def reset(self, **kwargs):
         self.prev_action = None
         return self.env.reset(**kwargs)
 
     def step(self, action):
+        # 1. Wysyłamy akcję w 100% bezpośrednio bez modyfikacji, chroniąc spójność MDP w buforze SAC
         obs, reward, terminated, truncated, info = self.env.step(action)
         
-        energy_cost = abs(info.get('reward_energy', float(obs[15])))
+        # Pobranie fizycznego zużycia energii w Watach
+        raw_energy = info.get('total_power_demand')
+        if raw_energy is None:
+            try:
+                obs_rms = self.get_wrapper_attr('obs_rms')
+                epsilon = self.get_wrapper_attr('epsilon')
+                mean_energy = obs_rms.mean[self.energy_idx]
+                std_energy = np.sqrt(obs_rms.var[self.energy_idx] + epsilon)
+                raw_energy = float(obs[self.energy_idx]) * std_energy + mean_energy
+            except AttributeError:
+                raw_energy = float(obs[self.energy_idx])
 
-        current_temp_norm = float(obs[8])
-        deadband = 0.2
-        
-        if abs(current_temp_norm) <= deadband:
-            comfort_now_penalty_raw = 0.0
-        else:
-            comfort_now_penalty_raw = np.exp(abs(current_temp_norm) - deadband) - 1.0
+        energy_cost = abs(raw_energy) / 1000.0
+
+        # Odnormalizowanie temperatur
+        try:
+            obs_rms = self.get_wrapper_attr('obs_rms')
+            epsilon = self.get_wrapper_attr('epsilon')
+            mean_temp = obs_rms.mean[self.temp_idx]
+            std_temp = np.sqrt(obs_rms.var[self.temp_idx] + epsilon)
             
-        pred_occ_norm = float(obs[-2])
-        future_temp_norm = float(obs[-1])
-        
-        if abs(future_temp_norm) <= deadband:
-            comfort_future_penalty_raw = 0.0
-        else:
-            comfort_future_penalty_raw = np.exp(abs(future_temp_norm) - deadband) - 1.0
-
-        occ_weight = np.clip((pred_occ_norm + 1.0) / 2.0, 0.0, 1.0)
-
-        comfort_now_penalty = comfort_now_penalty_raw * occ_weight
-        comfort_future_penalty = comfort_future_penalty_raw * occ_weight
-        
-        occupant_count_norm = float(obs[13])
-        if occupant_count_norm <= -0.9:
-            wasted_energy_penalty = energy_cost
-        else:
-            wasted_energy_penalty = 0.0
+            current_temp = float(obs[self.temp_idx]) * std_temp + mean_temp
+            future_temp = float(obs[-1]) * std_temp + mean_temp
+        except AttributeError:
+            current_temp = float(obs[self.temp_idx])
+            future_temp = float(obs[-1])
             
-        if action[0] > action[1]:
-            action_conflict_penalty = float(action[0] - action[1]) * 10.0
+        target_temp = 23.5
+        deadband = 0.5
+        
+        # Liniowa kara komfortu zamiast kwadratowej
+        current_diff = abs(current_temp - target_temp)
+        comfort_now_penalty_raw = float(max(0.0, current_diff - deadband))
+            
+        try:
+            mean_occ = obs_rms.mean[self.occ_idx]
+            std_occ = np.sqrt(obs_rms.var[self.occ_idx] + epsilon)
+            pred_occ = float(obs[-2]) * std_occ + mean_occ
+            current_occ = float(obs[self.occ_idx]) * std_occ + mean_occ
+        except AttributeError:
+            pred_occ = float(obs[-2])
+            current_occ = float(obs[self.occ_idx])
+        
+        future_diff = abs(future_temp - target_temp)
+        comfort_future_penalty_raw = float(max(0.0, future_diff - deadband))
+
+        # Skalowanie wag zajętości (zgodnie z życzeniem Użytkownika): (obs + 1) / 2
+        current_occ_weight = (obs[self.occ_idx] + 1.0) / 2.0
+        current_occ_weight = float(np.clip(current_occ_weight, 0.0, 1.0))
+
+        pred_occ_weight = (obs[-2] + 1.0) / 2.0
+        pred_occ_weight = float(np.clip(pred_occ_weight, 0.0, 1.0))
+
+        # Płynne skalowanie kar na podstawie wagi zajętości (bez sztywnych ograniczeń!)
+        comfort_now_penalty = comfort_now_penalty_raw * current_occ_weight
+        comfort_future_penalty = comfort_future_penalty_raw * pred_occ_weight
+
+        # Miękka kara za konflikt akcji (grzanie i chłodzenie zbyt blisko siebie)
+        deadband_margin = action[1] - action[0]
+        if deadband_margin < 0.5:
+            action_conflict_penalty = float((0.5 - deadband_margin) ** 2)
         else:
             action_conflict_penalty = 0.0
         
+        # Kara za dynamiczne zmiany setpointów (gładkość)
+        smoothing_penalty_val = 0.0
         if self.prev_action is not None:
-            action_smoothing_penalty = float(np.sum(np.abs(action - self.prev_action)))
-        else:
-            action_smoothing_penalty = 0.0
-        self.prev_action = action.copy()
+            smoothing_penalty_val = float(
+                ((action[0] - self.prev_action[0]) ** 2) + 
+                ((action[1] - self.prev_action[1]) ** 2)
+            )
+        self.prev_action = np.copy(action)
+
+        # Główne wagi fizyczne (Czyste podejście RL: Skupienie na energii)
+        # 1 kW energii karze bardziej niż 1 stopień odchylenia temperatury!
+        w_energy = 1.5
+        w_comfort_now = 2.0
+        w_comfort_future = 1.0
         
-        w_energy = 0.40
-        w_comfort_now = 0.35
-        w_comfort_future = 0.05
-        w_smoothing = 0.10
-        w_wasted = 0.40
-        w_conflict = 0.10
+        # Wagi pomocnicze kształtujące
+        w_conflict = 0.1
+        w_smoothing = 0.05
         
         custom_reward = - (
             w_energy * energy_cost + 
             w_comfort_now * comfort_now_penalty + 
-            w_comfort_future * comfort_future_penalty + 
-            w_smoothing * action_smoothing_penalty +
-            w_wasted * wasted_energy_penalty +
-            w_conflict * action_conflict_penalty
+            w_comfort_future * comfort_future_penalty +
+            w_conflict * action_conflict_penalty +
+            w_smoothing * smoothing_penalty_val
         )
        
+        # Zapis czystych metryk fizycznych dla ewaluacji
         info['custom_energy_cost'] = energy_cost
         info['custom_comfort_penalty'] = comfort_now_penalty
         info['custom_future_penalty'] = comfort_future_penalty
-        info['custom_smoothing_penalty'] = action_smoothing_penalty
-        info['wasted_energy_penalty'] = wasted_energy_penalty
+        info['custom_smoothing_penalty'] = smoothing_penalty_val
         info['action_conflict_penalty'] = action_conflict_penalty
 
         return obs, custom_reward, terminated, truncated, info
+
 
 
 def main():

@@ -23,7 +23,7 @@ class HVACPredictorLSTM(nn.Module):
         return pred
 
 class BuildingDataset(Dataset):
-    def __init__(self, states, actions, next_states, seq_length=5):
+    def __init__(self, states, actions, next_states, seq_length=5, indoor_temp_idx=12):
         self.states = states
         self.actions = actions
         self.next_states = next_states
@@ -32,10 +32,10 @@ class BuildingDataset(Dataset):
         self.inputs = np.concatenate((self.states, self.actions), axis=1)
         self.input_dim = self.inputs.shape[1]
         
-        self.indoor_temp_idx = 8
+        self.indoor_temp_idx = indoor_temp_idx
         
         print(f"Data loaded. LSTM input dimension: {self.input_dim}")
-        print(f"LSTM output dimension: 1 (Predicting normalized indoor temperature only)")
+        print(f"LSTM output dimension: 1 (Predicting normalized indoor temperature at index {self.indoor_temp_idx})")
 
     def __len__(self):
         return len(self.states) - self.seq_length
@@ -60,10 +60,18 @@ def train_model():
     print(f"Starting training on device: {device}")
 
     print("Loading data from data/lstm_dataset.npz...")
-    data = np.load('data/lstm_dataset.npz')
+    data = np.load('data/lstm_dataset.npz', allow_pickle=True)
     states = data['states']
     actions = data['actions']
     next_states = data['next_states']
+    
+    if 'state_columns' in data:
+        state_columns = data['state_columns'].tolist()
+        indoor_temp_idx = state_columns.index('air_temperature')
+        print(f"Dynamically found 'air_temperature' at index {indoor_temp_idx}")
+    else:
+        indoor_temp_idx = 12
+        print("Warning: state_columns not found in dataset. Falling back to default index 12.")
     
     # Chronological train/test split (80% / 20%)
     split_idx = int(len(states) * 0.8)
@@ -72,8 +80,8 @@ def train_model():
     train_actions, test_actions = actions[:split_idx], actions[split_idx:]
     train_next_states, test_next_states = next_states[:split_idx], next_states[split_idx:]
 
-    train_dataset = BuildingDataset(train_states, train_actions, train_next_states, seq_length=SEQ_LENGTH)
-    test_dataset = BuildingDataset(test_states, test_actions, test_next_states, seq_length=SEQ_LENGTH)
+    train_dataset = BuildingDataset(train_states, train_actions, train_next_states, seq_length=SEQ_LENGTH, indoor_temp_idx=indoor_temp_idx)
+    test_dataset = BuildingDataset(test_states, test_actions, test_next_states, seq_length=SEQ_LENGTH, indoor_temp_idx=indoor_temp_idx)
     
     dataloader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
     eval_dataloader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
@@ -130,7 +138,7 @@ def train_model():
             pred_lstm = model(batch_x.to(device)).cpu().numpy()
             all_y_lstm.append(pred_lstm)
             
-            last_indoor_temp = batch_x[:, -1, 8].unsqueeze(-1).cpu().numpy()
+            last_indoor_temp = batch_x[:, -1, test_dataset.indoor_temp_idx].unsqueeze(-1).cpu().numpy()
             all_y_naive.append(last_indoor_temp)
 
     y_true = np.concatenate(all_y_true, axis=0).flatten()

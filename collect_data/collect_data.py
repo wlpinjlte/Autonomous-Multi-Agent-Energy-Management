@@ -61,10 +61,15 @@ states_array = np.array(dataset_states)
 actions_array = np.array(dataset_actions)
 next_states_array = np.array(dataset_next_states)
 
+state_columns = env.get_wrapper_attr('observation_variables')
+action_columns = env.get_wrapper_attr('action_variables')
+
 np.savez('/app/data/lstm_dataset.npz', 
          states=states_array, 
          actions=actions_array, 
-         next_states=next_states_array)
+         next_states=next_states_array,
+         state_columns=state_columns,
+         action_columns=action_columns)
 print("Saved data to lstm_dataset.npz")
 
 env.close()

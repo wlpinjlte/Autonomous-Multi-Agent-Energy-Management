@@ -22,16 +22,17 @@ class OccupancyPredictorMLP(nn.Module):
         return self.net(x)
 
 class OccDataset(Dataset):
-    def __init__(self, states, next_states):
+    def __init__(self, states, next_states, occ_idx=14):
         self.states = states
         self.next_states = next_states
         
         self.inputs = self.states
         self.input_dim = self.inputs.shape[1]
         
-        self.occ_idx = 13 
+        self.occ_idx = occ_idx 
         
         print(f"Wymiar wejściowy MLP: {self.input_dim}")
+        print(f"Predykcja zajętości z indeksu: {self.occ_idx}")
 
     def __len__(self):
         return len(self.inputs)
@@ -50,9 +51,17 @@ def train_occupancy_model():
     print(f"Urządzenie docelowe: {device}")
     
     print(f"Ładowanie danych z data/lstm_dataset.npz dla predyktora zajętości...")
-    data = np.load('data/lstm_dataset.npz')
+    data = np.load('data/lstm_dataset.npz', allow_pickle=True)
     states = data['states']
     next_states = data['next_states']
+    
+    if 'state_columns' in data:
+        state_columns = data['state_columns'].tolist()
+        occ_idx = state_columns.index('people_occupant')
+        print(f"Dynamicznie znaleziono 'people_occupant' pod indeksem {occ_idx}")
+    else:
+        occ_idx = 14
+        print("Uwaga: brak state_columns w zbiorze. Używam domyślnego indeksu 14.")
     
     # Chronological train/test split (80% / 20%)
     split_idx = int(len(states) * 0.8)
@@ -60,8 +69,8 @@ def train_occupancy_model():
     train_states, test_states = states[:split_idx], states[split_idx:]
     train_next_states, test_next_states = next_states[:split_idx], next_states[split_idx:]
 
-    train_dataset = OccDataset(train_states, train_next_states)
-    test_dataset = OccDataset(test_states, test_next_states)
+    train_dataset = OccDataset(train_states, train_next_states, occ_idx=occ_idx)
+    test_dataset = OccDataset(test_states, test_next_states, occ_idx=occ_idx)
     
     dataloader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
     eval_dataloader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
@@ -108,7 +117,7 @@ def train_occupancy_model():
             pred_mlp = model(batch_x.to(device)).cpu().numpy()
             all_y_mlp.append(pred_mlp)
             
-            last_occ = batch_x[:, 13].unsqueeze(-1).cpu().numpy()
+            last_occ = batch_x[:, test_dataset.occ_idx].unsqueeze(-1).cpu().numpy()
             all_y_naive.append(last_occ)
 
     y_true = np.concatenate(all_y_true, axis=0).flatten()
