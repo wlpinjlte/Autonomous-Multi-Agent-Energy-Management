@@ -153,8 +153,12 @@ class CustomRewardWrapper(gym.Wrapper):
     def step(self, action):
         obs, reward, terminated, truncated, info = self.env.step(action)
         
+        # 1. Normalizacja Energii (Estymowane maksymalne zużycie to 20kW)
+        MAX_POWER = 20.0
         energy_cost = info.get('total_power_demand', 0.0) / 1000.0
+        energy_cost_norm = min(1.0, energy_cost / MAX_POWER)
 
+        # Odczyt nieznormalizowanych wartości (kod z try/except pozostaje z oryginału)
         try:
             obs_rms = self.get_wrapper_attr('obs_rms')
             epsilon = self.get_wrapper_attr('epsilon')
@@ -186,23 +190,36 @@ class CustomRewardWrapper(gym.Wrapper):
         
         target_temp = 23.5
         deadband = 0.5
+        alpha = 0.8  # Współczynnik nachylenia kary wykładniczej
         
-        comfort_now_penalty_raw = float(max(0.0, abs(current_temp - target_temp) - deadband))
-        comfort_future_t1_raw = float(max(0.0, abs(future_temp_t1 - target_temp) - deadband))
-        comfort_future_t2_raw = float(max(0.0, abs(future_temp_t2 - target_temp) - deadband))
+        # 2. Błędy bezwzględne
+        delta_now = float(max(0.0, abs(current_temp - target_temp) - deadband))
+        delta_t1 = float(max(0.0, abs(future_temp_t1 - target_temp) - deadband))
+        delta_t2 = float(max(0.0, abs(future_temp_t2 - target_temp) - deadband))
         
-        comfort_now_penalty = comfort_now_penalty_raw * current_occ_weight
-        comfort_future_penalty_t1 = comfort_future_t1_raw * pred_occ_t1_weight
-        comfort_future_penalty_t2 = comfort_future_t2_raw * pred_occ_t2_weight
+        # 3. Transformacja Wykładnicza
+        exp_comfort_now = np.exp(alpha * delta_now) - 1.0
+        exp_comfort_t1 = np.exp(alpha * delta_t1) - 1.0
+        exp_comfort_t2 = np.exp(alpha * delta_t2) - 1.0
         
+        # 4. Maskowanie z dolnym limitem (Base load threshold)
+        BASE_OCC_LIMIT = 0.15
+        w_occ_now = max(BASE_OCC_LIMIT, current_occ_weight)
+        w_occ_t1 = max(BASE_OCC_LIMIT, pred_occ_t1_weight)
+        w_occ_t2 = max(BASE_OCC_LIMIT, pred_occ_t2_weight)
+        
+        comfort_now_penalty = exp_comfort_now * w_occ_now
+        comfort_future_penalty_t1 = exp_comfort_t1 * w_occ_t1
+        comfort_future_penalty_t2 = exp_comfort_t2 * w_occ_t2
         comfort_future_penalty = (comfort_future_penalty_t1 + comfort_future_penalty_t2) / 2.0
 
-        w_energy = 5.0
-        w_comfort_now = 20.0
-        w_comfort_future = 5.0
+        # 5. Zbalansowane Wagi Ostateczne
+        w_energy = 0.5
+        w_comfort_now = 0.35
+        w_comfort_future = 0.15
         
         custom_reward = - (
-            w_energy * energy_cost + 
+            w_energy * energy_cost_norm + 
             w_comfort_now * comfort_now_penalty + 
             w_comfort_future * comfort_future_penalty
         )
