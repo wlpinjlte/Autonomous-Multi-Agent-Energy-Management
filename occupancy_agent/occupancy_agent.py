@@ -15,7 +15,7 @@ class OccupancyPredictorMLP(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, 1)
+            nn.Linear(hidden_dim, 2)
         )
 
     def forward(self, x):
@@ -35,12 +35,13 @@ class OccDataset(Dataset):
         print(f"Predykcja zajętości z indeksu: {self.occ_idx}")
 
     def __len__(self):
-        return len(self.inputs)
+        return len(self.inputs) - 1
 
     def __getitem__(self, idx):
         x = self.inputs[idx]
-        target_occ = self.next_states[idx, self.occ_idx]
-        return torch.tensor(x, dtype=torch.float32), torch.tensor([target_occ], dtype=torch.float32)
+        target_occ_t1 = self.next_states[idx, self.occ_idx]
+        target_occ_t2 = self.next_states[idx + 1, self.occ_idx]
+        return torch.tensor(x, dtype=torch.float32), torch.tensor([target_occ_t1, target_occ_t2], dtype=torch.float32)
 
 def train_occupancy_model():
     BATCH_SIZE = 256
@@ -118,7 +119,7 @@ def train_occupancy_model():
             all_y_mlp.append(pred_mlp)
             
             last_occ = batch_x[:, test_dataset.occ_idx].unsqueeze(-1).cpu().numpy()
-            all_y_naive.append(last_occ)
+            all_y_naive.append(np.repeat(last_occ, 2, axis=1))
 
     y_true = np.concatenate(all_y_true, axis=0).flatten()
     y_mlp = np.concatenate(all_y_mlp, axis=0).flatten()
@@ -147,7 +148,7 @@ def train_occupancy_model():
         f.write(f"Naive Last - MAE: {mae_naive:.4f}, MSE: {mse_naive:.4f}\n")
         f.write(f"Mean       - MAE: {mae_mean:.4f}, MSE: {mse_mean:.4f}\n")
     
-    plot_limit = min(300, len(y_true))
+    plot_limit = min(672, len(y_true))
     plt.figure(figsize=(14, 6))
     
     plt.plot(y_true[:plot_limit], label="Ground Truth (Rzeczywista Zajętość)", color="black", linewidth=2.5)

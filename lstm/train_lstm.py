@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 from sktime.performance_metrics.forecasting import mean_absolute_error, mean_squared_error
 
 class HVACPredictorLSTM(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim=1, num_layers=2):
+    def __init__(self, input_dim, hidden_dim, output_dim=2, num_layers=2):
         super(HVACPredictorLSTM, self).__init__()
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
@@ -38,14 +38,15 @@ class BuildingDataset(Dataset):
         print(f"LSTM output dimension: 1 (Predicting normalized indoor temperature at index {self.indoor_temp_idx})")
 
     def __len__(self):
-        return len(self.states) - self.seq_length
+        return len(self.states) - self.seq_length - 1
 
     def __getitem__(self, idx):
         x = self.inputs[idx : idx + self.seq_length]
         
-        target_temp = self.next_states[idx + self.seq_length - 1, self.indoor_temp_idx]
+        target_temp_t1 = self.next_states[idx + self.seq_length - 1, self.indoor_temp_idx]
+        target_temp_t2 = self.next_states[idx + self.seq_length, self.indoor_temp_idx]
         
-        return torch.tensor(x, dtype=torch.float32), torch.tensor([target_temp], dtype=torch.float32)
+        return torch.tensor(x, dtype=torch.float32), torch.tensor([target_temp_t1, target_temp_t2], dtype=torch.float32)
 
 
 def train_model():
@@ -139,7 +140,7 @@ def train_model():
             all_y_lstm.append(pred_lstm)
             
             last_indoor_temp = batch_x[:, -1, test_dataset.indoor_temp_idx].unsqueeze(-1).cpu().numpy()
-            all_y_naive.append(last_indoor_temp)
+            all_y_naive.append(np.repeat(last_indoor_temp, 2, axis=1))
 
     y_true = np.concatenate(all_y_true, axis=0).flatten()
     y_lstm = np.concatenate(all_y_lstm, axis=0).flatten()
@@ -169,7 +170,7 @@ def train_model():
         f.write(f"Naive Last - MAE: {mae_naive:.4f}, MSE: {mse_naive:.4f}\n")
         f.write(f"Mean       - MAE: {mae_mean:.4f}, MSE: {mse_mean:.4f}\n")
     
-    plot_limit = min(300, len(y_true))
+    plot_limit = min(672, len(y_true))
     plt.figure(figsize=(14, 6))
     
     plt.plot(y_true[:plot_limit], label="Ground Truth", color="black", linewidth=2.5)
