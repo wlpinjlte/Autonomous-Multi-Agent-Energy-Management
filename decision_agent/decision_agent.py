@@ -4,11 +4,13 @@ import torch
 import torch.nn as nn
 import gymnasium as gym
 import sinergym
+import os
 from sinergym.utils.wrappers import NormalizeObservation, DatetimeWrapper
 from gymnasium.wrappers import TransformObservation
 from gymnasium.spaces import Box
-from stable_baselines3 import PPO
+from stable_baselines3 import SAC
 from stable_baselines3.common.env_checker import check_env
+from stable_baselines3.common.vec_env import SubprocVecEnv
 
 class OccupancyNoiseWrapper(gym.Wrapper):
     def __init__(self, env, noise_std=2.0):
@@ -19,8 +21,13 @@ class OccupancyNoiseWrapper(gym.Wrapper):
         except (AttributeError, ValueError):
             self.occ_idx = 14
         self.noise_std = noise_std
+        
+        self.current_event_noise = 0.0
+        self.event_steps_remaining = 0
 
     def reset(self, **kwargs):
+        self.current_event_noise = 0.0
+        self.event_steps_remaining = 0
         obs, info = self.env.reset(**kwargs)
         obs = self._apply_noise(obs, info)
         return obs, info
@@ -36,6 +43,9 @@ class OccupancyNoiseWrapper(gym.Wrapper):
         day = info.get('day', 1)
         month = info.get('month', 1)
         
+        # Pobieramy izolowany generator liczb losowych dla danego środowiska
+        rng = self.env.np_random
+        
         import datetime
         try:
             dt = datetime.date(1991, month, day)
@@ -43,16 +53,28 @@ class OccupancyNoiseWrapper(gym.Wrapper):
         except ValueError:
             is_weekend = False
 
-        if is_weekend or hour < 6 or hour >= 24:
-            if np.random.rand() < 0.05:
-                current_noise = np.random.normal(0, self.noise_std)
-            else:
-                current_noise = 0.0
+        if self.event_steps_remaining > 0:
+            self.event_steps_remaining -= 1
+            if self.event_steps_remaining == 0:
+                self.current_event_noise = 0.0
         else:
-            current_noise = np.random.normal(0, self.noise_std)
-            
+            if is_weekend:
+                if rng.random() < 0.02 and 8 <= hour <= 18:
+                    self.current_event_noise = rng.uniform(5, 15)
+                    self.event_steps_remaining = rng.integers(16, 32)
+            elif hour < 6 or hour >= 20:
+                if rng.random() < 0.05:
+                    self.current_event_noise = rng.uniform(3, 8)
+                    self.event_steps_remaining = rng.integers(4, 10)
+            else:
+                if rng.random() < 0.10:
+                    self.current_event_noise = rng.normal(0, self.noise_std * 2)
+                    self.event_steps_remaining = rng.integers(4, 8)
+
         noisy_obs = np.array(obs, dtype=np.float32)
-        noisy_obs[self.occ_idx] = max(0.0, float(noisy_obs[self.occ_idx] + current_noise))
+        white_noise = rng.normal(0, 1.0) if not is_weekend and (6 <= hour < 20) else 0.0
+        total_noise = self.current_event_noise + white_noise
+        noisy_obs[self.occ_idx] = max(0.0, float(noisy_obs[self.occ_idx] + total_noise))
         return noisy_obs
 
 class HVACPredictorLSTM(nn.Module):
@@ -145,6 +167,11 @@ class CustomRewardWrapper(gym.Wrapper):
         except (AttributeError, ValueError):
             self.temp_idx = 12
             self.occ_idx = 14
+            
+        self.w_energy = float(os.getenv("WEIGHT_ENERGY", "0.80"))
+        self.w_comfort_now = float(os.getenv("WEIGHT_COMFORT_NOW", "0.05"))
+        self.w_comfort_future = float(os.getenv("WEIGHT_COMFORT_FUTURE", "0.15"))
+        print(f"[REWARD WRAPPER] Uruchomiono z wagami -> Energia: {self.w_energy}, Komfort: {self.w_comfort_now}, Przyszlosc: {self.w_comfort_future}")
 
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)
@@ -153,12 +180,11 @@ class CustomRewardWrapper(gym.Wrapper):
     def step(self, action):
         obs, reward, terminated, truncated, info = self.env.step(action)
         
-        # 1. Normalizacja Energii (Estymowane maksymalne zużycie to 20kW)
-        MAX_POWER = 20.0
-        energy_cost = info.get('total_power_demand', 0.0) / 1000.0
-        energy_cost_norm = min(1.0, energy_cost / MAX_POWER)
+        power_w = info.get('total_power_demand', 0.0)
+        lambda_energy = 1e-4 
+        energy_penalty = power_w * lambda_energy
 
-        # Odczyt nieznormalizowanych wartości (kod z try/except pozostaje z oryginału)
+        # 2. Odczyt nieznormalizowanych wartości z uwzględnieniem predyktorów LSTM/MLP
         try:
             obs_rms = self.get_wrapper_attr('obs_rms')
             epsilon = self.get_wrapper_attr('epsilon')
@@ -188,78 +214,93 @@ class CustomRewardWrapper(gym.Wrapper):
         pred_occ_t1_weight = float(np.clip((obs[-4] + 1.0) / 2.0, 0.0, 1.0))
         pred_occ_t2_weight = float(np.clip((obs[-3] + 1.0) / 2.0, 0.0, 1.0))
         
+        # 3. Zwiększenie rygoru temperaturowego
         target_temp = 23.5
         deadband = 0.5
-        alpha = 0.8  # Współczynnik nachylenia kary wykładniczej
         
-        # 2. Błędy bezwzględne
-        delta_now = float(max(0.0, abs(current_temp - target_temp) - deadband))
-        delta_t1 = float(max(0.0, abs(future_temp_t1 - target_temp) - deadband))
-        delta_t2 = float(max(0.0, abs(future_temp_t2 - target_temp) - deadband))
+        diff_now = current_temp - target_temp
+        diff_t1 = future_temp_t1 - target_temp
+        diff_t2 = future_temp_t2 - target_temp
         
-        # 3. Transformacja Wykładnicza
-        exp_comfort_now = np.exp(alpha * delta_now) - 1.0
-        exp_comfort_t1 = np.exp(alpha * delta_t1) - 1.0
-        exp_comfort_t2 = np.exp(alpha * delta_t2) - 1.0
+        # Opcja A: Asymetryczna kara
+        if current_occ_weight > 0.0:
+            delta_now = float(max(0.0, abs(diff_now) - deadband))
+        else:
+            delta_now = float(max(0.0, abs(diff_now) - deadband)) if diff_now < 0 else 0.0
+            
+        if pred_occ_t1_weight > 0.0:
+            delta_t1 = float(max(0.0, abs(diff_t1) - deadband))
+        else:
+            delta_t1 = float(max(0.0, abs(diff_t1) - deadband)) if diff_t1 < 0 else 0.0
+            
+        if pred_occ_t2_weight > 0.0:
+            delta_t2 = float(max(0.0, abs(diff_t2) - deadband))
+        else:
+            delta_t2 = float(max(0.0, abs(diff_t2) - deadband)) if diff_t2 < 0 else 0.0
         
-        # 4. Maskowanie z dolnym limitem (Base load threshold)
-        BASE_OCC_LIMIT = 0.15
-        w_occ_now = max(BASE_OCC_LIMIT, current_occ_weight)
-        w_occ_t1 = max(BASE_OCC_LIMIT, pred_occ_t1_weight)
-        w_occ_t2 = max(BASE_OCC_LIMIT, pred_occ_t2_weight)
-        
-        comfort_now_penalty = exp_comfort_now * w_occ_now
-        comfort_future_penalty_t1 = exp_comfort_t1 * w_occ_t1
-        comfort_future_penalty_t2 = exp_comfort_t2 * w_occ_t2
+        # Zdejmujemy w_occ, bo logika jest już zawarta wyżej
+        comfort_now_penalty = delta_now
+        comfort_future_penalty_t1 = delta_t1
+        comfort_future_penalty_t2 = delta_t2
         comfort_future_penalty = (comfort_future_penalty_t1 + comfort_future_penalty_t2) / 2.0
 
-        # 5. Zbalansowane Wagi Ostateczne
-        w_energy = 0.5
-        w_comfort_now = 0.35
-        w_comfort_future = 0.15
-        
+        # 5. Balans Wag (Ze środowiska)
         custom_reward = - (
-            w_energy * energy_cost_norm + 
-            w_comfort_now * comfort_now_penalty + 
-            w_comfort_future * comfort_future_penalty
+            self.w_energy * energy_penalty + 
+            self.w_comfort_now * comfort_now_penalty + 
+            self.w_comfort_future * comfort_future_penalty
         )
        
-        info['custom_energy_cost'] = energy_cost
+        info['custom_energy_cost'] = power_w / 1000.0
         info['custom_comfort_penalty'] = comfort_now_penalty
         info['custom_future_penalty'] = comfort_future_penalty
 
         return obs, custom_reward, terminated, truncated, info
 
-def main():
-    env = gym.make('Eplus-5zone-hot-continuous-stochastic-v1')
-    env = DatetimeWrapper(env)
-    env = OccupancyNoiseWrapper(env, noise_std=2.0)
-    env = NormalizeObservation(env)
-    
-    try:
-        data = np.load('data/lstm_dataset.npz')
-        obs_rms = env.get_wrapper_attr('obs_rms')
-        obs_rms.mean = data['obs_mean']
-        obs_rms.var = data['obs_var']
-        obs_rms.count = data['obs_count']
-        print("Loaded NormalizeObservation calibration from dataset.")
-    except Exception as e:
-        print(f"Could not load normalization calibration: {e}")
+def make_env(env_id, rank, seed=0):
+    def _init():
+        env = gym.make(env_id)
+        env = DatetimeWrapper(env)
+        env = OccupancyNoiseWrapper(env, noise_std=2.0)
+        env = NormalizeObservation(env)
         
-    new_obs_space = Box(low=env.observation_space.low, high=env.observation_space.high, dtype=np.float32)
-    env = TransformObservation(env, func=lambda obs: np.array(obs, dtype=np.float32), observation_space=new_obs_space)
+        try:
+            data = np.load('data/lstm_dataset.npz')
+            obs_rms = env.get_wrapper_attr('obs_rms')
+            obs_rms.mean = data['obs_mean']
+            obs_rms.var = data['obs_var']
+            obs_rms.count = data['obs_count']
+        except Exception as e:
+            print(f"[{rank}] Could not load normalization calibration: {e}")
+            
+        new_obs_space = Box(low=env.observation_space.low, high=env.observation_space.high, dtype=np.float32)
+        env = TransformObservation(env, func=lambda obs: np.array(obs, dtype=np.float32), observation_space=new_obs_space)
 
-    env = DualPredictorObservationWrapper(env, lstm_model_path='data/hvac_lstm_temperature_model.pth', occ_path='data/hvac_occupancy_model.pth')
-    env = CustomRewardWrapper(env)
+        env = DualPredictorObservationWrapper(env, lstm_model_path='data/hvac_lstm_temperature_model.pth', occ_path='data/hvac_occupancy_model.pth')
+        env = CustomRewardWrapper(env)
+        
+        env.reset(seed=seed + rank)
+        return env
+    return _init
 
-    print("Weryfikacja środowiska...")
-    check_env(env)
-    print("Architektura pozytywnie zweryfikowana. Uruchamiam trening PPO.")
+def main():
+    env_id = 'Eplus-5zone-hot-continuous-stochastic-v1'
+    num_cpu = 6
+    print(f"Inicjalizacja {num_cpu} równoległych środowisk...")
+    
+    # Check env on a single instance first
+    dummy_env = make_env(env_id, 0)()
+    check_env(dummy_env)
+    print("Architektura pozytywnie zweryfikowana.")
+    
+    env = SubprocVecEnv([make_env(env_id, i) for i in range(num_cpu)])
 
-    model = PPO("MlpPolicy", env, verbose=1, tensorboard_log="./ppo_hvac_tensorboard/", ent_coef=0.01)
+    print("Uruchamiam wielowątkowy trening SAC.")
+
+    model = SAC("MlpPolicy", env, verbose=1, tensorboard_log="./sac_hvac_tensorboard/")
     model.learn(total_timesteps=350000, log_interval=4)
 
-    model.save("data/ppo_hvac_agent_with_lstm")
+    model.save("data/sac_hvac_agent_with_lstm")
     print("Trening zakończony!")
 
 if __name__ == "__main__":

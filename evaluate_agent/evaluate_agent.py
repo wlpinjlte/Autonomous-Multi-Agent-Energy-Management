@@ -6,10 +6,11 @@ import torch
 import torch.nn as nn
 import gymnasium as gym
 import sinergym
+import os
 from sinergym.utils.wrappers import NormalizeObservation, DatetimeWrapper
 from gymnasium.wrappers import TransformObservation
 from gymnasium.spaces import Box
-from stable_baselines3 import PPO
+from stable_baselines3 import SAC
 import matplotlib.pyplot as plt
 from enum import Enum
 
@@ -22,8 +23,13 @@ class OccupancyNoiseWrapper(gym.Wrapper):
         except (AttributeError, ValueError):
             self.occ_idx = 14
         self.noise_std = noise_std
+        
+        self.current_event_noise = 0.0
+        self.event_steps_remaining = 0
 
     def reset(self, **kwargs):
+        self.current_event_noise = 0.0
+        self.event_steps_remaining = 0
         obs, info = self.env.reset(**kwargs)
         obs = self._apply_noise(obs, info)
         return obs, info
@@ -39,6 +45,9 @@ class OccupancyNoiseWrapper(gym.Wrapper):
         day = info.get('day', 1)
         month = info.get('month', 1)
         
+        # Pobieramy izolowany generator liczb losowych dla danego środowiska
+        rng = self.env.np_random
+        
         import datetime
         try:
             dt = datetime.date(1991, month, day)
@@ -46,16 +55,28 @@ class OccupancyNoiseWrapper(gym.Wrapper):
         except ValueError:
             is_weekend = False
 
-        if is_weekend or hour < 6 or hour >= 24:
-            if np.random.rand() < 0.05:
-                current_noise = np.random.normal(0, self.noise_std)
-            else:
-                current_noise = 0.0
+        if self.event_steps_remaining > 0:
+            self.event_steps_remaining -= 1
+            if self.event_steps_remaining == 0:
+                self.current_event_noise = 0.0
         else:
-            current_noise = np.random.normal(0, self.noise_std)
-            
+            if is_weekend:
+                if rng.random() < 0.02 and 8 <= hour <= 18:
+                    self.current_event_noise = rng.uniform(5, 15)
+                    self.event_steps_remaining = rng.integers(16, 32)
+            elif hour < 6 or hour >= 20:
+                if rng.random() < 0.05:
+                    self.current_event_noise = rng.uniform(3, 8)
+                    self.event_steps_remaining = rng.integers(4, 10)
+            else:
+                if rng.random() < 0.10:
+                    self.current_event_noise = rng.normal(0, self.noise_std * 2)
+                    self.event_steps_remaining = rng.integers(4, 8)
+
         noisy_obs = np.array(obs, dtype=np.float32)
-        noisy_obs[self.occ_idx] = max(0.0, float(noisy_obs[self.occ_idx] + current_noise))
+        white_noise = rng.normal(0, 1.0) if not is_weekend and (6 <= hour < 20) else 0.0
+        total_noise = self.current_event_noise + white_noise
+        noisy_obs[self.occ_idx] = max(0.0, float(noisy_obs[self.occ_idx] + total_noise))
         return noisy_obs
 
 
@@ -155,6 +176,11 @@ class CustomRewardWrapper(gym.Wrapper):
         except (AttributeError, ValueError):
             self.temp_idx = 12
             self.occ_idx = 14
+        import os
+        self.w_energy = float(os.getenv("WEIGHT_ENERGY", "0.80"))
+        self.w_comfort_now = float(os.getenv("WEIGHT_COMFORT_NOW", "0.05"))
+        self.w_comfort_future = float(os.getenv("WEIGHT_COMFORT_FUTURE", "0.15"))
+        print(f"[REWARD WRAPPER] Uruchomiono z wagami -> Energia: {self.w_energy}, Komfort: {self.w_comfort_now}, Przyszlosc: {self.w_comfort_future}")
 
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)
@@ -163,12 +189,11 @@ class CustomRewardWrapper(gym.Wrapper):
     def step(self, action):
         obs, reward, terminated, truncated, info = self.env.step(action)
         
-        # 1. Normalizacja Energii (Estymowane maksymalne zużycie to 20kW)
-        MAX_POWER = 20.0
-        energy_cost = info.get('total_power_demand', 0.0) / 1000.0
-        energy_cost_norm = min(1.0, energy_cost / MAX_POWER)
+        power_w = info.get('total_power_demand', 0.0)
+        lambda_energy = 1e-4 
+        energy_penalty = power_w * lambda_energy
 
-        # Odczyt nieznormalizowanych wartości (kod z try/except pozostaje z oryginału)
+        # 2. Odczyt nieznormalizowanych wartości z uwzględnieniem predyktorów LSTM/MLP
         try:
             obs_rms = self.get_wrapper_attr('obs_rms')
             epsilon = self.get_wrapper_attr('epsilon')
@@ -198,43 +223,44 @@ class CustomRewardWrapper(gym.Wrapper):
         pred_occ_t1_weight = float(np.clip((obs[-4] + 1.0) / 2.0, 0.0, 1.0))
         pred_occ_t2_weight = float(np.clip((obs[-3] + 1.0) / 2.0, 0.0, 1.0))
         
+        # 3. Zwiększenie rygoru temperaturowego
         target_temp = 23.5
         deadband = 0.5
-        alpha = 0.8  # Współczynnik nachylenia kary wykładniczej
         
-        # 2. Błędy bezwzględne
-        delta_now = float(max(0.0, abs(current_temp - target_temp) - deadband))
-        delta_t1 = float(max(0.0, abs(future_temp_t1 - target_temp) - deadband))
-        delta_t2 = float(max(0.0, abs(future_temp_t2 - target_temp) - deadband))
+        diff_now = current_temp - target_temp
+        diff_t1 = future_temp_t1 - target_temp
+        diff_t2 = future_temp_t2 - target_temp
         
-        # 3. Transformacja Wykładnicza
-        exp_comfort_now = np.exp(alpha * delta_now) - 1.0
-        exp_comfort_t1 = np.exp(alpha * delta_t1) - 1.0
-        exp_comfort_t2 = np.exp(alpha * delta_t2) - 1.0
+        # Opcja A: Asymetryczna kara
+        if current_occ_weight > 0.0:
+            delta_now = float(max(0.0, abs(diff_now) - deadband))
+        else:
+            delta_now = float(max(0.0, abs(diff_now) - deadband)) if diff_now < 0 else 0.0
+            
+        if pred_occ_t1_weight > 0.0:
+            delta_t1 = float(max(0.0, abs(diff_t1) - deadband))
+        else:
+            delta_t1 = float(max(0.0, abs(diff_t1) - deadband)) if diff_t1 < 0 else 0.0
+            
+        if pred_occ_t2_weight > 0.0:
+            delta_t2 = float(max(0.0, abs(diff_t2) - deadband))
+        else:
+            delta_t2 = float(max(0.0, abs(diff_t2) - deadband)) if diff_t2 < 0 else 0.0
         
-        # 4. Maskowanie z dolnym limitem (Base load threshold)
-        BASE_OCC_LIMIT = 0.15
-        w_occ_now = max(BASE_OCC_LIMIT, current_occ_weight)
-        w_occ_t1 = max(BASE_OCC_LIMIT, pred_occ_t1_weight)
-        w_occ_t2 = max(BASE_OCC_LIMIT, pred_occ_t2_weight)
-        
-        comfort_now_penalty = exp_comfort_now * w_occ_now
-        comfort_future_penalty_t1 = exp_comfort_t1 * w_occ_t1
-        comfort_future_penalty_t2 = exp_comfort_t2 * w_occ_t2
+        # Zdejmujemy w_occ, bo logika jest już zawarta wyżej
+        comfort_now_penalty = delta_now
+        comfort_future_penalty_t1 = delta_t1
+        comfort_future_penalty_t2 = delta_t2
         comfort_future_penalty = (comfort_future_penalty_t1 + comfort_future_penalty_t2) / 2.0
 
-        # 5. Zbalansowane Wagi Ostateczne
-        w_energy = 0.5
-        w_comfort_now = 0.35
-        w_comfort_future = 0.15
-        
+        # 5. Balans Wag (Ze środowiska)
         custom_reward = - (
-            w_energy * energy_cost_norm + 
-            w_comfort_now * comfort_now_penalty + 
-            w_comfort_future * comfort_future_penalty
+            self.w_energy * energy_penalty + 
+            self.w_comfort_now * comfort_now_penalty + 
+            self.w_comfort_future * comfort_future_penalty
         )
        
-        info['custom_energy_cost'] = energy_cost
+        info['custom_energy_cost'] = power_w / 1000.0
         info['custom_comfort_penalty'] = comfort_now_penalty
         info['custom_future_penalty'] = comfort_future_penalty
 
@@ -328,10 +354,10 @@ def main():
     env = TransformObservation(env, func=lambda obs: np.array(obs, dtype=np.float32), observation_space=new_obs_space)
     env = DualPredictorObservationWrapper(env, lstm_model_path='data/hvac_lstm_temperature_model.pth', occ_path='data/hvac_occupancy_model.pth')
     env = CustomRewardWrapper(env)
-    print("Ładowanie wytrenowanego agenta PPO...")
-    model = PPO.load("data/ppo_hvac_agent_with_lstm", env=env)
+    print("Ładowanie wytrenowanego agenta SAC...")
+    model = SAC.load("data/sac_hvac_agent_with_lstm", env=env)
 
-    print("\n[1/3] Ewaluacja modelu PPO + LSTM (Proszę czekać, symulacja roczna)...")
+    print("\n[1/3] Ewaluacja modelu SAC + LSTM (Proszę czekać, symulacja roczna)...")
     sac_history = run_episode(env, model=model, mode=ControlMode.SAC)
 
     print("\n[2/3] Ewaluacja tradycyjnego termostatu RBC (Standard)...")
@@ -369,28 +395,28 @@ def main():
 
     os.makedirs('data', exist_ok=True)
     with open('data/rl_vs_baseline_metrics.txt', 'w', encoding='utf-8') as f:
-        metrics_text = f"--- PORÓWNANIE: PPO+LSTM vs Tradycyjny Termostat (RBC) vs RBC Occupancy ---\n\n"
+        metrics_text = f"--- PORÓWNANIE: SAC+LSTM vs Tradycyjny Termostat (RBC) vs RBC Occupancy ---\n\n"
         metrics_text += f"1. Skumulowany koszt energii (Mniej = Lepiej):\n"
-        metrics_text += f"   PPO Agent: {sac_energy:.2f}\n"
+        metrics_text += f"   SAC Agent: {sac_energy:.2f}\n"
         metrics_text += f"   RBC Standard: {rbc_energy:.2f}\n"
         metrics_text += f"   RBC Occupancy: {rbc_occ_energy:.2f}\n"
-        metrics_text += f"   Zysk (PPO vs Standard): {((rbc_energy - sac_energy) / rbc_energy) * 100:.2f}%\n"
-        metrics_text += f"   Zysk (PPO vs Occupancy): {((rbc_occ_energy - sac_energy) / rbc_occ_energy) * 100:.2f}%\n\n"
+        metrics_text += f"   Zysk (SAC vs Standard): {((rbc_energy - sac_energy) / rbc_energy) * 100:.2f}%\n"
+        metrics_text += f"   Zysk (SAC vs Occupancy): {((rbc_occ_energy - sac_energy) / rbc_occ_energy) * 100:.2f}%\n\n"
         
         metrics_text += f"2. Skumulowana kara za dyskomfort cieplny (Mniej = Lepiej):\n"
-        metrics_text += f"   PPO Agent: {sac_comfort:.2f}\n"
+        metrics_text += f"   SAC Agent: {sac_comfort:.2f}\n"
         metrics_text += f"   RBC Standard: {rbc_comfort:.2f}\n"
         metrics_text += f"   RBC Occupancy: {rbc_occ_comfort:.2f}\n"
-        metrics_text += f"   Zysk (PPO vs Standard): {((rbc_comfort - sac_comfort) / (rbc_comfort + 1e-5)) * 100:.2f}%\n"
-        metrics_text += f"   Zysk (PPO vs Occupancy): {((rbc_occ_comfort - sac_comfort) / (rbc_occ_comfort + 1e-5)) * 100:.2f}%\n\n"
+        metrics_text += f"   Zysk (SAC vs Standard): {((rbc_comfort - sac_comfort) / max(rbc_comfort, 1e-5)) * 100:.2f}%\n"
+        metrics_text += f"   Zysk (SAC vs Occupancy): {((rbc_occ_comfort - sac_comfort) / max(rbc_occ_comfort, 1e-5)) * 100:.2f}%\n\n"
         
         metrics_text += f"3. Średnia nagroda na krok (Więcej = Lepiej):\n"
-        metrics_text += f"   PPO Agent: {sac_reward:.4f}\n"
+        metrics_text += f"   SAC Agent: {sac_reward:.4f}\n"
         metrics_text += f"   RBC Standard: {rbc_reward:.4f}\n"
         metrics_text += f"   RBC Occupancy: {rbc_occ_reward:.4f}\n\n"
-
+        
         metrics_text += f"4. Szczegóły Kar (Future Penalty):\n"
-        metrics_text += f"   PPO Agent: Future={sac_future:.2f}\n"
+        metrics_text += f"   SAC Agent: Future={sac_future:.2f}\n"
         metrics_text += f"   RBC Standard: Future={rbc_future:.2f}\n"
         metrics_text += f"   RBC Occupancy: Future={rbc_occ_future:.2f}\n"
         f.write(metrics_text)
@@ -398,7 +424,7 @@ def main():
     plt.figure(figsize=(16, 10))
     
     plt.subplot(2, 2, 1)
-    plt.plot(np.cumsum(sac_history['energy']), label="PPO + LSTM", color="royalblue", linewidth=2)
+    plt.plot(np.cumsum(sac_history['energy']), label="SAC + LSTM", color="royalblue", linewidth=2)
     plt.plot(np.cumsum(rbc_history['energy']), label="RBC Standard", color="crimson", linestyle="--", linewidth=2)
     plt.plot(np.cumsum(rbc_occ_history['energy']), label="RBC Occupancy", color="forestgreen", linestyle=":", linewidth=2)
     plt.title("Skumulowane Zużycie Energii (Wysterowanie HVAC)")

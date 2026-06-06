@@ -148,7 +148,7 @@ def train_occupancy_model():
         f.write(f"Naive Last - MAE: {mae_naive:.4f}, MSE: {mse_naive:.4f}\n")
         f.write(f"Mean       - MAE: {mae_mean:.4f}, MSE: {mse_mean:.4f}\n")
     
-    plot_limit = min(672, len(y_true))
+    plot_limit = min(1500, len(y_true))
     plt.figure(figsize=(14, 6))
     
     plt.plot(y_true[:plot_limit], label="Ground Truth (Rzeczywista Zajętość)", color="black", linewidth=2.5)
