@@ -45,7 +45,7 @@ class OccupancyNoiseWrapper(gym.Wrapper):
         day = info.get('day', 1)
         month = info.get('month', 1)
         
-        # Pobieramy izolowany generator liczb losowych dla danego środowiska
+        # Get isolated random number generator for given environment
         rng = self.env.np_random
         
         import datetime
@@ -180,7 +180,7 @@ class CustomRewardWrapper(gym.Wrapper):
         self.w_energy = float(os.getenv("WEIGHT_ENERGY", "0.80"))
         self.w_comfort_now = float(os.getenv("WEIGHT_COMFORT_NOW", "0.05"))
         self.w_comfort_future = float(os.getenv("WEIGHT_COMFORT_FUTURE", "0.15"))
-        print(f"[REWARD WRAPPER] Uruchomiono z wagami -> Energia: {self.w_energy}, Komfort: {self.w_comfort_now}, Przyszlosc: {self.w_comfort_future}")
+        print(f"[REWARD WRAPPER] Started with weights -> Energy: {self.w_energy}, Comfort: {self.w_comfort_now}, Future: {self.w_comfort_future}")
 
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)
@@ -193,7 +193,7 @@ class CustomRewardWrapper(gym.Wrapper):
         lambda_energy = 1e-4 
         energy_penalty = power_w * lambda_energy
 
-        # 2. Odczyt nieznormalizowanych wartości z uwzględnieniem predyktorów LSTM/MLP
+        # 2. Read unnormalized values taking into account LSTM/MLP predictors
         try:
             obs_rms = self.get_wrapper_attr('obs_rms')
             epsilon = self.get_wrapper_attr('epsilon')
@@ -223,7 +223,7 @@ class CustomRewardWrapper(gym.Wrapper):
         pred_occ_t1_weight = float(np.clip((obs[-4] + 1.0) / 2.0, 0.0, 1.0))
         pred_occ_t2_weight = float(np.clip((obs[-3] + 1.0) / 2.0, 0.0, 1.0))
         
-        # 3. Zwiększenie rygoru temperaturowego
+        # 3. Increase temperature strictness
         target_temp = 23.5
         deadband = 0.5
         
@@ -231,7 +231,7 @@ class CustomRewardWrapper(gym.Wrapper):
         diff_t1 = future_temp_t1 - target_temp
         diff_t2 = future_temp_t2 - target_temp
         
-        # Opcja A: Asymetryczna kara
+        # Option A: Asymmetric penalty
         if current_occ_weight > 0.0:
             delta_now = float(max(0.0, abs(diff_now) - deadband))
         else:
@@ -247,13 +247,13 @@ class CustomRewardWrapper(gym.Wrapper):
         else:
             delta_t2 = float(max(0.0, abs(diff_t2) - deadband)) if diff_t2 < 0 else 0.0
         
-        # Zdejmujemy w_occ, bo logika jest już zawarta wyżej
+        # We remove w_occ because logic is already included above
         comfort_now_penalty = delta_now
         comfort_future_penalty_t1 = delta_t1
         comfort_future_penalty_t2 = delta_t2
         comfort_future_penalty = (comfort_future_penalty_t1 + comfort_future_penalty_t2) / 2.0
 
-        # 5. Balans Wag (Ze środowiska)
+        # 5. Weights balance (From environment)
         custom_reward = - (
             self.w_energy * energy_penalty + 
             self.w_comfort_now * comfort_now_penalty + 
@@ -334,7 +334,22 @@ def main():
     if eplus_path not in sys.path:
         sys.path.insert(0, eplus_path)
 
-    env = gym.make('Eplus-5zone-hot-continuous-stochastic-v1')
+    env_id = 'Eplus-5zone-hot-continuous-stochastic-v1'
+    temp_env = gym.make(env_id)
+    try:
+        default_vars = temp_env.get_wrapper_attr('variables')
+        default_acts = temp_env.get_wrapper_attr('actuators')
+        default_meters = temp_env.get_wrapper_attr('meters')
+    except AttributeError:
+        default_vars = temp_env.unwrapped.variables
+        default_acts = temp_env.unwrapped.actuators
+        default_meters = temp_env.unwrapped.meters
+    temp_env.close()
+
+    new_vars = {k: (v[0], str(v[1]).replace('SPACE1-1', 'SPACE5-1').replace('ZONE-1', 'SPACE5-1')) if isinstance(v, tuple) and len(v) == 2 else v for k, v in default_vars.items()}
+    new_acts = {k: (v[0], v[1], str(v[2]).replace('SPACE1-1', 'SPACE5-1').replace('ZONE-1', 'SPACE5-1')) if isinstance(v, tuple) and len(v) == 3 else v for k, v in default_acts.items()}
+
+    env = gym.make(env_id, variables=new_vars, actuators=new_acts, meters=default_meters)
     env = DatetimeWrapper(env)
     env = OccupancyNoiseWrapper(env, noise_std=2.0)
     env = NormalizeObservation(env)
@@ -354,16 +369,16 @@ def main():
     env = TransformObservation(env, func=lambda obs: np.array(obs, dtype=np.float32), observation_space=new_obs_space)
     env = DualPredictorObservationWrapper(env, lstm_model_path='data/hvac_lstm_temperature_model.pth', occ_path='data/hvac_occupancy_model.pth')
     env = CustomRewardWrapper(env)
-    print("Ładowanie wytrenowanego agenta SAC...")
+    print("Loading trained SAC agent...")
     model = SAC.load("data/sac_hvac_agent_with_lstm", env=env)
 
-    print("\n[1/3] Ewaluacja modelu SAC + LSTM (Proszę czekać, symulacja roczna)...")
+    print("\n[1/3] Evaluating SAC + LSTM model (Please wait, one-year simulation)...")
     sac_history = run_episode(env, model=model, mode=ControlMode.SAC)
 
-    print("\n[2/3] Ewaluacja tradycyjnego termostatu RBC (Standard)...")
+    print("\n[2/3] Evaluating traditional RBC thermostat (Standard)...")
     rbc_history = run_episode(env, mode=ControlMode.RBC_STANDARD)
 
-    print("\n[3/3] Ewaluacja termostatu RBC (Zależny od obecności)...")
+    print("\n[3/3] Evaluating RBC thermostat (Occupancy-dependent)...")
     rbc_occ_history = run_episode(env, mode=ControlMode.RBC_OCCUPANCY)
 
     env.close()
@@ -395,27 +410,27 @@ def main():
 
     os.makedirs('data', exist_ok=True)
     with open('data/rl_vs_baseline_metrics.txt', 'w', encoding='utf-8') as f:
-        metrics_text = f"--- PORÓWNANIE: SAC+LSTM vs Tradycyjny Termostat (RBC) vs RBC Occupancy ---\n\n"
-        metrics_text += f"1. Skumulowany koszt energii (Mniej = Lepiej):\n"
+        metrics_text = f"--- COMPARISON: SAC+LSTM vs Traditional Thermostat (RBC) vs RBC Occupancy ---\n\n"
+        metrics_text += f"1. Cumulative energy cost (Less = Better):\n"
         metrics_text += f"   SAC Agent: {sac_energy:.2f}\n"
         metrics_text += f"   RBC Standard: {rbc_energy:.2f}\n"
         metrics_text += f"   RBC Occupancy: {rbc_occ_energy:.2f}\n"
-        metrics_text += f"   Zysk (SAC vs Standard): {((rbc_energy - sac_energy) / rbc_energy) * 100:.2f}%\n"
-        metrics_text += f"   Zysk (SAC vs Occupancy): {((rbc_occ_energy - sac_energy) / rbc_occ_energy) * 100:.2f}%\n\n"
+        metrics_text += f"   Gain (SAC vs Standard): {((rbc_energy - sac_energy) / rbc_energy) * 100:.2f}%\n"
+        metrics_text += f"   Gain (SAC vs Occupancy): {((rbc_occ_energy - sac_energy) / rbc_occ_energy) * 100:.2f}%\n\n"
         
-        metrics_text += f"2. Skumulowana kara za dyskomfort cieplny (Mniej = Lepiej):\n"
+        metrics_text += f"2. Cumulative thermal discomfort penalty (Less = Better):\n"
         metrics_text += f"   SAC Agent: {sac_comfort:.2f}\n"
         metrics_text += f"   RBC Standard: {rbc_comfort:.2f}\n"
         metrics_text += f"   RBC Occupancy: {rbc_occ_comfort:.2f}\n"
-        metrics_text += f"   Zysk (SAC vs Standard): {((rbc_comfort - sac_comfort) / max(rbc_comfort, 1e-5)) * 100:.2f}%\n"
-        metrics_text += f"   Zysk (SAC vs Occupancy): {((rbc_occ_comfort - sac_comfort) / max(rbc_occ_comfort, 1e-5)) * 100:.2f}%\n\n"
+        metrics_text += f"   Gain (SAC vs Standard): {((rbc_comfort - sac_comfort) / max(rbc_comfort, 1e-5)) * 100:.2f}%\n"
+        metrics_text += f"   Gain (SAC vs Occupancy): {((rbc_occ_comfort - sac_comfort) / max(rbc_occ_comfort, 1e-5)) * 100:.2f}%\n\n"
         
-        metrics_text += f"3. Średnia nagroda na krok (Więcej = Lepiej):\n"
+        metrics_text += f"3. Mean reward per step (More = Better):\n"
         metrics_text += f"   SAC Agent: {sac_reward:.4f}\n"
         metrics_text += f"   RBC Standard: {rbc_reward:.4f}\n"
         metrics_text += f"   RBC Occupancy: {rbc_occ_reward:.4f}\n\n"
         
-        metrics_text += f"4. Szczegóły Kar (Future Penalty):\n"
+        metrics_text += f"4. Penalty Details (Future Penalty):\n"
         metrics_text += f"   SAC Agent: Future={sac_future:.2f}\n"
         metrics_text += f"   RBC Standard: Future={rbc_future:.2f}\n"
         metrics_text += f"   RBC Occupancy: Future={rbc_occ_future:.2f}\n"
@@ -427,9 +442,9 @@ def main():
     plt.plot(np.cumsum(sac_history['energy']), label="SAC + LSTM", color="royalblue", linewidth=2)
     plt.plot(np.cumsum(rbc_history['energy']), label="RBC Standard", color="crimson", linestyle="--", linewidth=2)
     plt.plot(np.cumsum(rbc_occ_history['energy']), label="RBC Occupancy", color="forestgreen", linestyle=":", linewidth=2)
-    plt.title("Skumulowane Zużycie Energii (Wysterowanie HVAC)")
-    plt.xlabel("Kroki symulacji (czas)")
-    plt.ylabel("Jednostki energii")
+    plt.title("Cumulative Energy Consumption (HVAC Control)")
+    plt.xlabel("Simulation steps (time)")
+    plt.ylabel("Energy units")
     plt.legend()
     plt.grid(True, alpha=0.3)
 
@@ -437,9 +452,9 @@ def main():
     plt.plot(np.cumsum(sac_history['comfort_penalty']), label="SAC + LSTM", color="royalblue", linewidth=2)
     plt.plot(np.cumsum(rbc_history['comfort_penalty']), label="RBC Standard", color="crimson", linestyle="--", linewidth=2)
     plt.plot(np.cumsum(rbc_occ_history['comfort_penalty']), label="RBC Occupancy", color="forestgreen", linestyle=":", linewidth=2)
-    plt.title("Skumulowana Kara za Brak Komfortu Cieplnego")
-    plt.xlabel("Kroki symulacji (czas)")
-    plt.ylabel("Skumulowana kara (MSE)")
+    plt.title("Cumulative Thermal Discomfort Penalty")
+    plt.xlabel("Simulation steps (time)")
+    plt.ylabel("Cumulative penalty (MSE)")
     plt.legend()
     plt.grid(True, alpha=0.3)
 
@@ -447,9 +462,9 @@ def main():
     plt.hist(sac_history['temp'], bins=50, alpha=0.6, label="SAC + LSTM", color="royalblue", density=True)
     plt.hist(rbc_history['temp'], bins=50, alpha=0.5, label="RBC Standard", color="crimson", density=True)
     plt.hist(rbc_occ_history['temp'], bins=50, alpha=0.4, label="RBC Occupancy", color="forestgreen", density=True)
-    plt.title("Rozkład Rzeczywistych Temperatur w Pomieszczeniu")
-    plt.xlabel("Temperatura w st. Celsjusza (20 = ideał)")
-    plt.ylabel("Gęstość")
+    plt.title("Distribution of Actual Indoor Temperatures")
+    plt.xlabel("Temperature in Celsius (20 = ideal)")
+    plt.ylabel("Density")
     plt.legend()
     plt.grid(True, alpha=0.3)
 
@@ -458,9 +473,9 @@ def main():
     plt.plot(sac_history['temp'][:plot_limit], label="SAC + LSTM", color="royalblue", alpha=0.9, linewidth=1.5)
     plt.plot(rbc_history['temp'][:plot_limit], label="RBC Standard", color="crimson", linestyle="--", alpha=0.8, linewidth=1.5)
     plt.plot(rbc_occ_history['temp'][:plot_limit], label="RBC Occupancy", color="forestgreen", linestyle=":", alpha=0.8, linewidth=1.5)
-    plt.title(f"Profil Temperatur Wewnętrznych (Pierwsze {plot_limit} kroków)")
-    plt.xlabel("Kroki symulacji")
-    plt.ylabel("Temperatura w st. Celsjusza")
+    plt.title(f"Indoor Temperature Profile (First {plot_limit} steps)")
+    plt.xlabel("Simulation steps")
+    plt.ylabel("Temperature in Celsius")
     plt.legend()
     plt.grid(True, alpha=0.3)
 
@@ -468,8 +483,8 @@ def main():
     plt.savefig('data/evaluation_rl_vs_rbc.png', dpi=300)
     plt.close()
 
-    print("\n[✔] Zapisano raport tekstowy do 'data/rl_vs_baseline_metrics.txt'.")
-    print("[✔] Zapisano arkusz wykresów do 'data/evaluation_rl_vs_rbc.png'.\n")
+    print("\n[✔] Saved text report to 'data/rl_vs_baseline_metrics.txt'.")
+    print("[✔] Saved plots sheet to 'data/evaluation_rl_vs_rbc.png'.\n")
 
 if __name__ == "__main__":
     main()

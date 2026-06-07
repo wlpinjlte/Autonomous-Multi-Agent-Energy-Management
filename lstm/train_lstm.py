@@ -170,19 +170,45 @@ def train_model():
         f.write(f"Naive Last - MAE: {mae_naive:.4f}, MSE: {mse_naive:.4f}\n")
         f.write(f"Mean       - MAE: {mae_mean:.4f}, MSE: {mse_mean:.4f}\n")
     
-    plot_limit = min(672, len(y_true))
-    plt.figure(figsize=(14, 6))
+    y_true_t1 = y_true[::2]
+    y_lstm_t1 = y_lstm[::2]
+    y_naive_t1 = y_naive[::2]
     
-    plt.plot(y_true[:plot_limit], label="Ground Truth", color="black", linewidth=2.5)
-    plt.plot(y_lstm[:plot_limit], label=f"LSTM (MAE: {mae_lstm:.3f})", color="royalblue", alpha=0.9, linewidth=1.5)
-    plt.plot(y_naive[:plot_limit], label=f"Naive Last (MAE: {mae_naive:.3f})", color="crimson", linestyle="--", alpha=0.8)
-    plt.plot(y_mean[:plot_limit], label=f"Mean Baseline", color="forestgreen", linestyle=":", alpha=0.8, linewidth=2)
+    y_true_t2 = y_true[1::2]
+    y_lstm_t2 = y_lstm[1::2]
+    y_naive_t2 = y_naive[1::2]
     
-    plt.title(f"Comparison of predictive models: LSTM vs Baseline (First {plot_limit} steps)")
-    plt.xlabel("Time steps")
-    plt.ylabel("Normalized Indoor Temperature")
-    plt.legend(loc="upper right")
-    plt.grid(True, alpha=0.3)
+    mae_lstm_t1 = mean_absolute_error(y_true_t1, y_lstm_t1)
+    mae_lstm_t2 = mean_absolute_error(y_true_t2, y_lstm_t2)
+    mae_naive_t1 = mean_absolute_error(y_true_t1, y_naive_t1)
+    mae_naive_t2 = mean_absolute_error(y_true_t2, y_naive_t2)
+    
+    mse_lstm_t1 = mean_squared_error(y_true_t1, y_lstm_t1)
+    mse_lstm_t2 = mean_squared_error(y_true_t2, y_lstm_t2)
+    mse_naive_t1 = mean_squared_error(y_true_t1, y_naive_t1)
+    mse_naive_t2 = mean_squared_error(y_true_t2, y_naive_t2)
+    
+    plot_limit = min(672, len(y_true_t1))
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10))
+    
+    # Subplot 1: T+1
+    ax1.plot(y_true_t1[:plot_limit], label="Ground Truth (T+1)", color="black", linewidth=2.5)
+    ax1.plot(y_lstm_t1[:plot_limit], label=f"LSTM T+1 (MSE: {mse_lstm_t1:.3f})", color="royalblue", alpha=0.9, linewidth=1.5)
+    ax1.plot(y_naive_t1[:plot_limit], label=f"Naive Last T+1 (MSE: {mse_naive_t1:.3f})", color="crimson", linestyle="--", alpha=0.8)
+    ax1.set_title(f"Prediction 1 step ahead (T+1) - First {plot_limit} steps (approx {plot_limit/96:.1f} days)")
+    ax1.set_ylabel("Normalized Indoor Temp")
+    ax1.legend(loc="upper right")
+    ax1.grid(True, alpha=0.3)
+    
+    # Subplot 2: T+2
+    ax2.plot(y_true_t2[:plot_limit], label="Ground Truth (T+2)", color="black", linewidth=2.5)
+    ax2.plot(y_lstm_t2[:plot_limit], label=f"LSTM T+2 (MSE: {mse_lstm_t2:.3f})", color="darkorange", alpha=0.9, linewidth=1.5)
+    ax2.plot(y_naive_t2[:plot_limit], label=f"Naive Last T+2 (MSE: {mse_naive_t2:.3f})", color="crimson", linestyle="--", alpha=0.8)
+    ax2.set_title(f"Prediction 2 steps ahead (T+2) - First {plot_limit} steps")
+    ax2.set_xlabel("Simulation steps (1 step = 15 minutes)")
+    ax2.set_ylabel("Normalized Indoor Temp")
+    ax2.legend(loc="upper right")
+    ax2.grid(True, alpha=0.3)
     
     plt.tight_layout()
     plt.savefig('data/evaluation_plot.png', dpi=300)

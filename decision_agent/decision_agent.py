@@ -43,7 +43,7 @@ class OccupancyNoiseWrapper(gym.Wrapper):
         day = info.get('day', 1)
         month = info.get('month', 1)
         
-        # Pobieramy izolowany generator liczb losowych dla danego środowiska
+        # Get isolated random number generator for given environment
         rng = self.env.np_random
         
         import datetime
@@ -171,7 +171,7 @@ class CustomRewardWrapper(gym.Wrapper):
         self.w_energy = float(os.getenv("WEIGHT_ENERGY", "0.80"))
         self.w_comfort_now = float(os.getenv("WEIGHT_COMFORT_NOW", "0.05"))
         self.w_comfort_future = float(os.getenv("WEIGHT_COMFORT_FUTURE", "0.15"))
-        print(f"[REWARD WRAPPER] Uruchomiono z wagami -> Energia: {self.w_energy}, Komfort: {self.w_comfort_now}, Przyszlosc: {self.w_comfort_future}")
+        print(f"[REWARD WRAPPER] Started with weights -> Energy: {self.w_energy}, Comfort: {self.w_comfort_now}, Future: {self.w_comfort_future}")
 
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)
@@ -184,7 +184,7 @@ class CustomRewardWrapper(gym.Wrapper):
         lambda_energy = 1e-4 
         energy_penalty = power_w * lambda_energy
 
-        # 2. Odczyt nieznormalizowanych wartości z uwzględnieniem predyktorów LSTM/MLP
+        # 2. Read unnormalized values taking into account LSTM/MLP predictors
         try:
             obs_rms = self.get_wrapper_attr('obs_rms')
             epsilon = self.get_wrapper_attr('epsilon')
@@ -214,7 +214,7 @@ class CustomRewardWrapper(gym.Wrapper):
         pred_occ_t1_weight = float(np.clip((obs[-4] + 1.0) / 2.0, 0.0, 1.0))
         pred_occ_t2_weight = float(np.clip((obs[-3] + 1.0) / 2.0, 0.0, 1.0))
         
-        # 3. Zwiększenie rygoru temperaturowego
+        # 3. Increase temperature strictness
         target_temp = 23.5
         deadband = 0.5
         
@@ -222,7 +222,7 @@ class CustomRewardWrapper(gym.Wrapper):
         diff_t1 = future_temp_t1 - target_temp
         diff_t2 = future_temp_t2 - target_temp
         
-        # Opcja A: Asymetryczna kara
+        # Option A: Asymmetric penalty
         if current_occ_weight > 0.0:
             delta_now = float(max(0.0, abs(diff_now) - deadband))
         else:
@@ -238,13 +238,13 @@ class CustomRewardWrapper(gym.Wrapper):
         else:
             delta_t2 = float(max(0.0, abs(diff_t2) - deadband)) if diff_t2 < 0 else 0.0
         
-        # Zdejmujemy w_occ, bo logika jest już zawarta wyżej
+        # We remove w_occ because logic is already included above
         comfort_now_penalty = delta_now
         comfort_future_penalty_t1 = delta_t1
         comfort_future_penalty_t2 = delta_t2
         comfort_future_penalty = (comfort_future_penalty_t1 + comfort_future_penalty_t2) / 2.0
 
-        # 5. Balans Wag (Ze środowiska)
+        # 5. Weights balance (From environment)
         custom_reward = - (
             self.w_energy * energy_penalty + 
             self.w_comfort_now * comfort_now_penalty + 
@@ -259,7 +259,22 @@ class CustomRewardWrapper(gym.Wrapper):
 
 def make_env(env_id, rank, seed=0):
     def _init():
-        env = gym.make(env_id)
+        # Changing zone from ZONE-1/SPACE1-1 to SPACE5-1
+        temp_env = gym.make(env_id)
+        try:
+            default_vars = temp_env.get_wrapper_attr('variables')
+            default_acts = temp_env.get_wrapper_attr('actuators')
+            default_meters = temp_env.get_wrapper_attr('meters')
+        except AttributeError:
+            default_vars = temp_env.unwrapped.variables
+            default_acts = temp_env.unwrapped.actuators
+            default_meters = temp_env.unwrapped.meters
+        temp_env.close()
+
+        new_vars = {k: (v[0], str(v[1]).replace('SPACE1-1', 'SPACE5-1').replace('ZONE-1', 'SPACE5-1')) if isinstance(v, tuple) and len(v) == 2 else v for k, v in default_vars.items()}
+        new_acts = {k: (v[0], v[1], str(v[2]).replace('SPACE1-1', 'SPACE5-1').replace('ZONE-1', 'SPACE5-1')) if isinstance(v, tuple) and len(v) == 3 else v for k, v in default_acts.items()}
+
+        env = gym.make(env_id, variables=new_vars, actuators=new_acts, meters=default_meters)
         env = DatetimeWrapper(env)
         env = OccupancyNoiseWrapper(env, noise_std=2.0)
         env = NormalizeObservation(env)
@@ -286,22 +301,22 @@ def make_env(env_id, rank, seed=0):
 def main():
     env_id = 'Eplus-5zone-hot-continuous-stochastic-v1'
     num_cpu = 6
-    print(f"Inicjalizacja {num_cpu} równoległych środowisk...")
+    print(f"Initializing {num_cpu} parallel environments...")
     
     # Check env on a single instance first
     dummy_env = make_env(env_id, 0)()
     check_env(dummy_env)
-    print("Architektura pozytywnie zweryfikowana.")
+    print("Architecture positively verified.")
     
     env = SubprocVecEnv([make_env(env_id, i) for i in range(num_cpu)])
 
-    print("Uruchamiam wielowątkowy trening SAC.")
+    print("Running multi-threaded SAC training.")
 
     model = SAC("MlpPolicy", env, verbose=1, tensorboard_log="./sac_hvac_tensorboard/")
     model.learn(total_timesteps=350000, log_interval=4)
 
     model.save("data/sac_hvac_agent_with_lstm")
-    print("Trening zakończony!")
+    print("Training completed!")
 
 if __name__ == "__main__":
     main()

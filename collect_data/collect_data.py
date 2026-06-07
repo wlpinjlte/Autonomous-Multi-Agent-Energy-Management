@@ -70,11 +70,27 @@ class OccupancyNoiseWrapper(gym.Wrapper):
 
 
 env_id = 'Eplus-5zone-hot-continuous-stochastic-v1'
-env = gym.make(env_id)
+
+# Changing zone from ZONE-1/SPACE1-1 (side zone) to SPACE5-1 (middle zone)
+temp_env = gym.make(env_id)
+try:
+    default_vars = temp_env.get_wrapper_attr('variables')
+    default_acts = temp_env.get_wrapper_attr('actuators')
+    default_meters = temp_env.get_wrapper_attr('meters')
+except AttributeError:
+    default_vars = temp_env.unwrapped.variables
+    default_acts = temp_env.unwrapped.actuators
+    default_meters = temp_env.unwrapped.meters
+temp_env.close()
+
+new_vars = {k: (v[0], str(v[1]).replace('SPACE1-1', 'SPACE5-1').replace('ZONE-1', 'SPACE5-1')) if isinstance(v, tuple) and len(v) == 2 else v for k, v in default_vars.items()}
+new_acts = {k: (v[0], v[1], str(v[2]).replace('SPACE1-1', 'SPACE5-1').replace('ZONE-1', 'SPACE5-1')) if isinstance(v, tuple) and len(v) == 3 else v for k, v in default_acts.items()}
+
+env = gym.make(env_id, variables=new_vars, actuators=new_acts, meters=default_meters)
 
 
 env = DatetimeWrapper(env)
-env = OccupancyNoiseWrapper(env, noise_std=2.0) # Zaszumienie przed normalizacją
+env = OccupancyNoiseWrapper(env, noise_std=2.0) # Noise before normalization
 # rescal to [-1, 1]
 env = NormalizeObservation(env)
 
