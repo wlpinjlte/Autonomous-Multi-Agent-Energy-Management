@@ -10,3 +10,7 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+    environment:
+      - WEIGHT_ENERGY=${WEIGHT_ENERGY:-0.80}
+      - WEIGHT_COMFORT_NOW=${WEIGHT_COMFORT_NOW:-0.05}
+      - WEIGHT_COMFORT_FUTURE=${WEIGHT_COMFORT_FUTURE:-0.15}
