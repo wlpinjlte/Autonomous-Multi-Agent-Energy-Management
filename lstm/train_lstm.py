@@ -149,64 +149,61 @@ def train_model():
     global_mean = y_true.mean()
     y_mean = np.full_like(y_true, global_mean)
     
-    mae_lstm = mean_absolute_error(y_true, y_lstm)
-    mse_lstm = mean_squared_error(y_true, y_lstm)
-    
-    mae_naive = mean_absolute_error(y_true, y_naive)
-    mse_naive = mean_squared_error(y_true, y_naive)
-    
-    mae_mean = mean_absolute_error(y_true, y_mean)
-    mse_mean = mean_squared_error(y_true, y_mean)
-    
-    print("\n--- METRICS SUMMARY (sktime) ---")
-    print(f"LSTM       - MAE: {mae_lstm:.4f}, MSE: {mse_lstm:.4f}")
-    print(f"Naive Last - MAE: {mae_naive:.4f}, MSE: {mse_naive:.4f}")
-    print(f"Mean       - MAE: {mae_mean:.4f}, MSE: {mse_mean:.4f}")
-    
-    os.makedirs('data', exist_ok=True)
-    with open('data/evaluation_metrics.txt', 'w', encoding='utf-8') as f:
-        f.write("--- EVALUATION METRICS ---\n")
-        f.write(f"LSTM       - MAE: {mae_lstm:.4f}, MSE: {mse_lstm:.4f}\n")
-        f.write(f"Naive Last - MAE: {mae_naive:.4f}, MSE: {mse_naive:.4f}\n")
-        f.write(f"Mean       - MAE: {mae_mean:.4f}, MSE: {mse_mean:.4f}\n")
-    
     y_true_t1 = y_true[::2]
     y_lstm_t1 = y_lstm[::2]
     y_naive_t1 = y_naive[::2]
+    y_mean_t1 = y_mean[::2]
     
     y_true_t2 = y_true[1::2]
     y_lstm_t2 = y_lstm[1::2]
     y_naive_t2 = y_naive[1::2]
+    y_mean_t2 = y_mean[1::2]
     
     mae_lstm_t1 = mean_absolute_error(y_true_t1, y_lstm_t1)
     mae_lstm_t2 = mean_absolute_error(y_true_t2, y_lstm_t2)
     mae_naive_t1 = mean_absolute_error(y_true_t1, y_naive_t1)
     mae_naive_t2 = mean_absolute_error(y_true_t2, y_naive_t2)
+    mae_mean_t1 = mean_absolute_error(y_true_t1, y_mean_t1)
+    mae_mean_t2 = mean_absolute_error(y_true_t2, y_mean_t2)
     
     mse_lstm_t1 = mean_squared_error(y_true_t1, y_lstm_t1)
     mse_lstm_t2 = mean_squared_error(y_true_t2, y_lstm_t2)
     mse_naive_t1 = mean_squared_error(y_true_t1, y_naive_t1)
     mse_naive_t2 = mean_squared_error(y_true_t2, y_naive_t2)
+    mse_mean_t1 = mean_squared_error(y_true_t1, y_mean_t1)
+    mse_mean_t2 = mean_squared_error(y_true_t2, y_mean_t2)
+    
+    print("\n--- METRICS SUMMARY (sktime) ---")
+    print(f"LSTM       - MAE: {mae_lstm_t1:.4f} (T+1), {mae_lstm_t2:.4f} (T+2) | MSE: {mse_lstm_t1:.4f} (T+1), {mse_lstm_t2:.4f} (T+2)")
+    print(f"Naive Last - MAE: {mae_naive_t1:.4f} (T+1), {mae_naive_t2:.4f} (T+2) | MSE: {mse_naive_t1:.4f} (T+1), {mse_naive_t2:.4f} (T+2)")
+    print(f"Mean       - MAE: {mae_mean_t1:.4f} (T+1), {mae_mean_t2:.4f} (T+2) | MSE: {mse_mean_t1:.4f} (T+1), {mse_mean_t2:.4f} (T+2)")
+    
+    os.makedirs('data', exist_ok=True)
+    with open('data/evaluation_metrics.txt', 'w', encoding='utf-8') as f:
+        f.write("--- EVALUATION METRICS ---\n")
+        f.write(f"LSTM       - MAE: {mae_lstm_t1:.4f} (T+1), {mae_lstm_t2:.4f} (T+2) | MSE: {mse_lstm_t1:.4f} (T+1), {mse_lstm_t2:.4f} (T+2)\n")
+        f.write(f"Naive Last - MAE: {mae_naive_t1:.4f} (T+1), {mae_naive_t2:.4f} (T+2) | MSE: {mse_naive_t1:.4f} (T+1), {mse_naive_t2:.4f} (T+2)\n")
+        f.write(f"Mean       - MAE: {mae_mean_t1:.4f} (T+1), {mae_mean_t2:.4f} (T+2) | MSE: {mse_mean_t1:.4f} (T+1), {mse_mean_t2:.4f} (T+2)\n")
     
     plot_limit = min(672, len(y_true_t1))
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10))
     
     # Subplot 1: T+1
-    ax1.plot(y_true_t1[:plot_limit], label="Ground Truth (T+1)", color="black", linewidth=2.5)
+    ax1.plot(y_true_t1[:plot_limit], label="Wartość rzeczywista (T+1)", color="black", linewidth=2.5)
     ax1.plot(y_lstm_t1[:plot_limit], label=f"LSTM T+1 (MSE: {mse_lstm_t1:.3f})", color="royalblue", alpha=0.9, linewidth=1.5)
-    ax1.plot(y_naive_t1[:plot_limit], label=f"Naive Last T+1 (MSE: {mse_naive_t1:.3f})", color="crimson", linestyle="--", alpha=0.8)
-    ax1.set_title(f"Prediction 1 step ahead (T+1) - First {plot_limit} steps (approx {plot_limit/96:.1f} days)")
-    ax1.set_ylabel("Normalized Indoor Temp")
+    ax1.plot(y_naive_t1[:plot_limit], label=f"Naiwne (ostatnia wartość) T+1 (MSE: {mse_naive_t1:.3f})", color="crimson", linestyle="--", alpha=0.8)
+    ax1.set_title(f"Predykcja 1 krok w przód (T+1) - Pierwsze {plot_limit} kroków (ok. {plot_limit/96:.1f} dni)")
+    ax1.set_ylabel("Znormalizowana temperatura wewnątrz")
     ax1.legend(loc="upper right")
     ax1.grid(True, alpha=0.3)
     
     # Subplot 2: T+2
-    ax2.plot(y_true_t2[:plot_limit], label="Ground Truth (T+2)", color="black", linewidth=2.5)
+    ax2.plot(y_true_t2[:plot_limit], label="Wartość rzeczywista (T+2)", color="black", linewidth=2.5)
     ax2.plot(y_lstm_t2[:plot_limit], label=f"LSTM T+2 (MSE: {mse_lstm_t2:.3f})", color="darkorange", alpha=0.9, linewidth=1.5)
-    ax2.plot(y_naive_t2[:plot_limit], label=f"Naive Last T+2 (MSE: {mse_naive_t2:.3f})", color="crimson", linestyle="--", alpha=0.8)
-    ax2.set_title(f"Prediction 2 steps ahead (T+2) - First {plot_limit} steps")
-    ax2.set_xlabel("Simulation steps (1 step = 15 minutes)")
-    ax2.set_ylabel("Normalized Indoor Temp")
+    ax2.plot(y_naive_t2[:plot_limit], label=f"Naiwne (ostatnia wartość) T+2 (MSE: {mse_naive_t2:.3f})", color="crimson", linestyle="--", alpha=0.8)
+    ax2.set_title(f"Predykcja 2 kroki w przód (T+2) - Pierwsze {plot_limit} kroków")
+    ax2.set_xlabel("Kroki symulacji (1 krok = 15 minut)")
+    ax2.set_ylabel("Znormalizowana temperatura wewnątrz")
     ax2.legend(loc="upper right")
     ax2.grid(True, alpha=0.3)
     

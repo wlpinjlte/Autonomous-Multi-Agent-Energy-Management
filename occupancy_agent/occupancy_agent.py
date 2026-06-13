@@ -159,25 +159,25 @@ def train_occupancy_model():
         f.write(f"Naive Last - MSE: {mse_naive_t1:.4f} (T+1), {mse_naive_t2:.4f} (T+2)\n")
         f.write(f"Naive Mean - MSE: {mse_mean_t1:.4f} (T+1), {mse_mean_t2:.4f} (T+2)\n")
     
-    plot_limit = min(750, len(y_true_t1))
+    plot_limit = min(672, len(y_true_t1))
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10))
     
     # Subplot 1: T+1
-    ax1.plot(y_true_t1[:plot_limit], label="Ground Truth (T+1)", color="black", linewidth=2.5)
+    ax1.plot(y_true_t1[:plot_limit], label="Wartość rzeczywista (T+1)", color="black", linewidth=2.5)
     ax1.plot(y_mlp_t1[:plot_limit], label=f"MLP T+1 (MSE: {mse_mlp_t1:.3f})", color="royalblue", alpha=0.9, linewidth=1.5)
-    ax1.plot(y_naive_t1[:plot_limit], label=f"Naive Last T+1 (MSE: {mse_naive_t1:.3f})", color="crimson", linestyle="--", alpha=0.8)
-    ax1.set_title(f"Prediction 1 step ahead (T+1) - First {plot_limit} steps (approx {plot_limit/96:.1f} days)")
-    ax1.set_ylabel("Normalized Occupancy")
+    ax1.plot(y_naive_t1[:plot_limit], label=f"Naiwne (ostatnia wartość) T+1 (MSE: {mse_naive_t1:.3f})", color="crimson", linestyle="--", alpha=0.8)
+    ax1.set_title(f"Predykcja 1 krok w przód (T+1) - Pierwsze {plot_limit} kroków (ok. {plot_limit/96:.1f} dni)")
+    ax1.set_ylabel("Znormalizowana liczba osób")
     ax1.legend(loc="upper right")
     ax1.grid(True, alpha=0.3)
     
     # Subplot 2: T+2
-    ax2.plot(y_true_t2[:plot_limit], label="Ground Truth (T+2)", color="black", linewidth=2.5)
+    ax2.plot(y_true_t2[:plot_limit], label="Wartość rzeczywista (T+2)", color="black", linewidth=2.5)
     ax2.plot(y_mlp_t2[:plot_limit], label=f"MLP T+2 (MSE: {mse_mlp_t2:.3f})", color="darkorange", alpha=0.9, linewidth=1.5)
-    ax2.plot(y_naive_t2[:plot_limit], label=f"Naive Last T+2 (MSE: {mse_naive_t2:.3f})", color="crimson", linestyle="--", alpha=0.8)
-    ax2.set_title(f"Prediction 2 steps ahead (T+2) - First {plot_limit} steps")
-    ax2.set_xlabel("Simulation steps (1 step = 15 minutes)")
-    ax2.set_ylabel("Normalized Occupancy")
+    ax2.plot(y_naive_t2[:plot_limit], label=f"Naiwne (ostatnia wartość) T+2 (MSE: {mse_naive_t2:.3f})", color="crimson", linestyle="--", alpha=0.8)
+    ax2.set_title(f"Predykcja 2 kroki w przód (T+2) - Pierwsze {plot_limit} kroków")
+    ax2.set_xlabel("Kroki symulacji (1 krok = 15 minut)")
+    ax2.set_ylabel("Znormalizowana liczba osób")
     ax2.legend(loc="upper right")
     ax2.grid(True, alpha=0.3)
     

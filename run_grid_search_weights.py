@@ -119,16 +119,12 @@ def main():
         run_evaluations(candidates, "Coarse Grid Search", "coarse")
         
     elif args.mode == "random":
-        for _ in range(args.trials):
+        while len(candidates) < args.trials:
             w_eng = round(random.uniform(args.min_eng, args.max_eng), 2)
             w_comf = round(random.uniform(args.min_comf, args.max_comf), 2)
             w_fut = round(1.0 - w_eng - w_comf, 2)
-            if w_fut >= 0:
+            if w_fut > 0.0:
                 candidates.append((w_eng, w_comf, w_fut))
-            else:
-                # Safety fallback if w_eng and w_comf exceed 1.0
-                w_comf_adjusted = round(1.0 - w_eng, 2)
-                candidates.append((w_eng, w_comf_adjusted, 0.0))
         
         print(f"Sampled {args.trials} configurations in the specified range.")
         run_evaluations(candidates, "Random Search (Fine tuning)", "random")
