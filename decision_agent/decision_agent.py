@@ -238,13 +238,11 @@ class CustomRewardWrapper(gym.Wrapper):
         else:
             delta_t2 = float(max(0.0, abs(diff_t2) - deadband)) if diff_t2 < 0 else 0.0
         
-        # We remove w_occ because logic is already included above
         comfort_now_penalty = delta_now
         comfort_future_penalty_t1 = delta_t1
         comfort_future_penalty_t2 = delta_t2
         comfort_future_penalty = (comfort_future_penalty_t1 + comfort_future_penalty_t2) / 2.0
 
-        # 5. Weights balance (From environment)
         custom_reward = - (
             self.w_energy * energy_penalty + 
             self.w_comfort_now * comfort_now_penalty + 
@@ -303,7 +301,6 @@ def main():
     num_cpu = 6
     print(f"Initializing {num_cpu} parallel environments...")
     
-    # Check env on a single instance first
     dummy_env = make_env(env_id, 0)()
     check_env(dummy_env)
     print("Architecture positively verified.")

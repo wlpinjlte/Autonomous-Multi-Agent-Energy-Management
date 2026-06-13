@@ -266,8 +266,8 @@ class CustomRewardWrapper(gym.Wrapper):
 
         return obs, custom_reward, terminated, truncated, info
 
-def run_episode(env, model=None, mode=ControlMode.SAC):
-    obs, info = env.reset()
+def run_episode(env, model=None, mode=ControlMode.SAC, seed=24):
+    obs, info = env.reset(seed=seed)
     terminated = False
     truncated = False
     
