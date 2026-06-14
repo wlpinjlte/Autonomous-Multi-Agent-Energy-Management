@@ -136,7 +136,12 @@ class DualPredictorObservationWrapper(gym.Wrapper):
 
     def _get_augmented_obs(self, obs):
         seq = list(self.history)
-        seq.append(np.concatenate((obs, np.zeros(self.env.action_space.shape))))
+        if len(seq) > 0:
+            last_action = seq[-1][obs.shape[0]:]
+        else:
+            last_action = (self.env.action_space.low + self.env.action_space.high) / 2.0
+            
+        seq.append(np.concatenate((obs, last_action)))
         x_lstm = torch.tensor(np.array(seq), dtype=torch.float32).unsqueeze(0).to(self.device)
         x_occ = torch.tensor(obs, dtype=torch.float32).unsqueeze(0).to(self.device)
         
@@ -150,8 +155,9 @@ class DualPredictorObservationWrapper(gym.Wrapper):
         obs, info = self.env.reset(**kwargs)
         self.history.clear()
         
+        neutral_action = (self.env.action_space.low + self.env.action_space.high) / 2.0
         for _ in range(self.seq_length - 1):
-            self.history.append(np.concatenate((obs, np.zeros(self.env.action_space.shape))))
+            self.history.append(np.concatenate((obs, neutral_action)))
             
         self.current_obs = obs
         return self._get_augmented_obs(obs), info
@@ -197,31 +203,28 @@ class CustomRewardWrapper(gym.Wrapper):
         try:
             obs_rms = self.get_wrapper_attr('obs_rms')
             epsilon = self.get_wrapper_attr('epsilon')
+            
+            # Unnormalize temperature
             mean_temp = obs_rms.mean[self.temp_idx]
             std_temp = np.sqrt(obs_rms.var[self.temp_idx] + epsilon)
-            
             current_temp = float(obs[self.temp_idx]) * std_temp + mean_temp
             future_temp_t1 = float(obs[-2]) * std_temp + mean_temp
             future_temp_t2 = float(obs[-1]) * std_temp + mean_temp
+            
+            # Unnormalize occupancy
+            mean_occ = obs_rms.mean[self.occ_idx]
+            std_occ = np.sqrt(obs_rms.var[self.occ_idx] + epsilon)
+            current_occ_unnorm_obs = float(obs[self.occ_idx]) * std_occ + mean_occ
+            pred_occ_t1_unnorm = float(obs[-4]) * std_occ + mean_occ
+            pred_occ_t2_unnorm = float(obs[-3]) * std_occ + mean_occ
         except AttributeError:
             current_temp = float(obs[self.temp_idx])
             future_temp_t1 = float(obs[-2])
             future_temp_t2 = float(obs[-1])
             
-        true_occ_unnorm = info.get('true_occupancy_unnorm', None)
-        if true_occ_unnorm is not None:
-            try:
-                obs_rms = self.get_wrapper_attr('obs_rms')
-                epsilon = self.get_wrapper_attr('epsilon')
-                true_occ_norm = (true_occ_unnorm - obs_rms.mean[self.occ_idx]) / np.sqrt(obs_rms.var[self.occ_idx] + epsilon)
-                current_occ_weight = float(np.clip((true_occ_norm + 1.0) / 2.0, 0.0, 1.0))
-            except AttributeError:
-                current_occ_weight = 1.0 if true_occ_unnorm > 0 else 0.0
-        else:
-            current_occ_weight = float(np.clip((obs[self.occ_idx] + 1.0) / 2.0, 0.0, 1.0))
-            
-        pred_occ_t1_weight = float(np.clip((obs[-4] + 1.0) / 2.0, 0.0, 1.0))
-        pred_occ_t2_weight = float(np.clip((obs[-3] + 1.0) / 2.0, 0.0, 1.0))
+            current_occ_unnorm_obs = float(obs[self.occ_idx])
+            pred_occ_t1_unnorm = float(obs[-4])
+            pred_occ_t2_unnorm = float(obs[-3])
         
         # 3. Increase temperature strictness
         target_temp = 23.5
@@ -232,20 +235,20 @@ class CustomRewardWrapper(gym.Wrapper):
         diff_t2 = future_temp_t2 - target_temp
         
         # Option A: Asymmetric penalty
-        if current_occ_weight > 0.0:
+        if current_occ_unnorm_obs > 0.5:
             delta_now = float(max(0.0, abs(diff_now) - deadband))
         else:
-            delta_now = float(max(0.0, abs(diff_now) - deadband)) if diff_now < 0 else 0.0
+            delta_now = 0.0
             
-        if pred_occ_t1_weight > 0.0:
+        if pred_occ_t1_unnorm > 0.5:
             delta_t1 = float(max(0.0, abs(diff_t1) - deadband))
         else:
-            delta_t1 = float(max(0.0, abs(diff_t1) - deadband)) if diff_t1 < 0 else 0.0
+            delta_t1 = 0.0
             
-        if pred_occ_t2_weight > 0.0:
+        if pred_occ_t2_unnorm > 0.5:
             delta_t2 = float(max(0.0, abs(diff_t2) - deadband))
         else:
-            delta_t2 = float(max(0.0, abs(diff_t2) - deadband)) if diff_t2 < 0 else 0.0
+            delta_t2 = 0.0
         
         # We remove w_occ because logic is already included above
         comfort_now_penalty = delta_now
@@ -266,7 +269,7 @@ class CustomRewardWrapper(gym.Wrapper):
 
         return obs, custom_reward, terminated, truncated, info
 
-def run_episode(env, model=None, mode=ControlMode.SAC, seed=24):
+def run_episode(env, model=None, mode=ControlMode.SAC, seed=42):
     obs, info = env.reset(seed=seed)
     terminated = False
     truncated = False
