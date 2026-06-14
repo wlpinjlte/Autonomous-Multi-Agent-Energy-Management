@@ -210,21 +210,10 @@ class CustomRewardWrapper(gym.Wrapper):
             current_temp = float(obs[self.temp_idx]) * std_temp + mean_temp
             future_temp_t1 = float(obs[-2]) * std_temp + mean_temp
             future_temp_t2 = float(obs[-1]) * std_temp + mean_temp
-            
-            # Unnormalize occupancy
-            mean_occ = obs_rms.mean[self.occ_idx]
-            std_occ = np.sqrt(obs_rms.var[self.occ_idx] + epsilon)
-            current_occ_unnorm_obs = float(obs[self.occ_idx]) * std_occ + mean_occ
-            pred_occ_t1_unnorm = float(obs[-4]) * std_occ + mean_occ
-            pred_occ_t2_unnorm = float(obs[-3]) * std_occ + mean_occ
         except AttributeError:
             current_temp = float(obs[self.temp_idx])
             future_temp_t1 = float(obs[-2])
             future_temp_t2 = float(obs[-1])
-            
-            current_occ_unnorm_obs = float(obs[self.occ_idx])
-            pred_occ_t1_unnorm = float(obs[-4])
-            pred_occ_t2_unnorm = float(obs[-3])
         
         # 3. Increase temperature strictness
         target_temp = 23.5
@@ -234,29 +223,19 @@ class CustomRewardWrapper(gym.Wrapper):
         diff_t1 = future_temp_t1 - target_temp
         diff_t2 = future_temp_t2 - target_temp
         
-        # Option A: Asymmetric penalty
-        if current_occ_unnorm_obs > 0.5:
-            delta_now = float(max(0.0, abs(diff_now) - deadband))
-        else:
-            delta_now = 0.0
-            
-        if pred_occ_t1_unnorm > 0.5:
-            delta_t1 = float(max(0.0, abs(diff_t1) - deadband))
-        else:
-            delta_t1 = 0.0
-            
-        if pred_occ_t2_unnorm > 0.5:
-            delta_t2 = float(max(0.0, abs(diff_t2) - deadband))
-        else:
-            delta_t2 = 0.0
+        current_occ_weight = float(np.clip((obs[self.occ_idx] + 1.0) / 2.0, 0.0, 1.0))
+        pred_occ_t1_weight = float(np.clip((obs[-4] + 1.0) / 2.0, 0.0, 1.0))
+        pred_occ_t2_weight = float(np.clip((obs[-3] + 1.0) / 2.0, 0.0, 1.0))
+
+        delta_now = float(max(0.0, abs(diff_now) - deadband)) 
+        delta_t1 = float(max(0.0, abs(diff_t1) - deadband)) 
+        delta_t2 = float(max(0.0, abs(diff_t2) - deadband)) 
         
-        # We remove w_occ because logic is already included above
-        comfort_now_penalty = delta_now
-        comfort_future_penalty_t1 = delta_t1
-        comfort_future_penalty_t2 = delta_t2
+        comfort_now_penalty = delta_now * current_occ_weight
+        comfort_future_penalty_t1 = delta_t1 * pred_occ_t1_weight
+        comfort_future_penalty_t2 = delta_t2 * pred_occ_t2_weight
         comfort_future_penalty = (comfort_future_penalty_t1 + comfort_future_penalty_t2) / 2.0
 
-        # 5. Weights balance (From environment)
         custom_reward = - (
             self.w_energy * energy_penalty + 
             self.w_comfort_now * comfort_now_penalty + 
