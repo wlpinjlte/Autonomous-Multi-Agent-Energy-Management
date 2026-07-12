@@ -210,10 +210,21 @@ class CustomRewardWrapper(gym.Wrapper):
             current_temp = float(obs[self.temp_idx]) * std_temp + mean_temp
             future_temp_t1 = float(obs[-2]) * std_temp + mean_temp
             future_temp_t2 = float(obs[-1]) * std_temp + mean_temp
+            
+            # Unnormalize occupancy
+            mean_occ = obs_rms.mean[self.occ_idx]
+            std_occ = np.sqrt(obs_rms.var[self.occ_idx] + epsilon)
+            current_occ = float(obs[self.occ_idx]) * std_occ + mean_occ
+            future_occ_t1 = float(obs[-4]) * std_occ + mean_occ
+            future_occ_t2 = float(obs[-3]) * std_occ + mean_occ
         except AttributeError:
             current_temp = float(obs[self.temp_idx])
             future_temp_t1 = float(obs[-2])
             future_temp_t2 = float(obs[-1])
+            
+            current_occ = float(obs[self.occ_idx])
+            future_occ_t1 = float(obs[-4])
+            future_occ_t2 = float(obs[-3])
         
         # 3. Increase temperature strictness
         target_temp = 23.5
@@ -223,9 +234,10 @@ class CustomRewardWrapper(gym.Wrapper):
         diff_t1 = future_temp_t1 - target_temp
         diff_t2 = future_temp_t2 - target_temp
         
-        current_occ_weight = float(np.clip((obs[self.occ_idx] + 1.0) / 2.0, 0.0, 1.0))
-        pred_occ_t1_weight = float(np.clip((obs[-4] + 1.0) / 2.0, 0.0, 1.0))
-        pred_occ_t2_weight = float(np.clip((obs[-3] + 1.0) / 2.0, 0.0, 1.0))
+        # Calculate comfort weights based on actual number of people (binary scaling 0 or 1)
+        current_occ_weight = 1.0 if current_occ > 0.0 else 0.0
+        pred_occ_t1_weight = 1.0 if future_occ_t1 > 0.0 else 0.0
+        pred_occ_t2_weight = 1.0 if future_occ_t2 > 0.0 else 0.0
 
         delta_now = float(max(0.0, abs(diff_now) - deadband)) 
         delta_t1 = float(max(0.0, abs(diff_t1) - deadband)) 
@@ -430,7 +442,7 @@ def main():
     plt.plot(np.cumsum(rbc_occ_history['energy']), label="RBC bazujące na obecności", color="forestgreen", linestyle=":", linewidth=2)
     plt.title("Skumulowane zużycie energii (Sterowanie HVAC)")
     plt.xlabel("Kroki symulacji (15 min)")
-    plt.ylabel("Energia (kW)")
+    plt.ylabel("Energia (kWh)")
     plt.legend()
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
@@ -443,7 +455,7 @@ def main():
     plt.plot(np.cumsum(rbc_occ_history['comfort_penalty']), label="RBC bazujące na obecności", color="forestgreen", linestyle=":", linewidth=2)
     plt.title("Skumulowana kara za dyskomfort termiczny")
     plt.xlabel("Kroki symulacji (15 min)")
-    plt.ylabel("Skumulowana kara (MSE)")
+    plt.ylabel("Skumulowana kara")
     plt.legend()
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
@@ -485,7 +497,7 @@ def main():
     plt.plot(np.cumsum(rbc_occ_history['energy']), label="RBC bazujące na obecności", color="forestgreen", linestyle=":", linewidth=2)
     plt.title("Skumulowane zużycie energii (Sterowanie HVAC)")
     plt.xlabel("Kroki symulacji (15 min)")
-    plt.ylabel("Energia (kW)")
+    plt.ylabel("Energia (kWh)")
     plt.legend()
     plt.grid(True, alpha=0.3)
 
@@ -495,7 +507,7 @@ def main():
     plt.plot(np.cumsum(rbc_occ_history['comfort_penalty']), label="RBC bazujące na obecności", color="forestgreen", linestyle=":", linewidth=2)
     plt.title("Skumulowana kara za dyskomfort termiczny")
     plt.xlabel("Kroki symulacji (15 min)")
-    plt.ylabel("Skumulowana kara (MSE)")
+    plt.ylabel("Skumulowana kara (°C)")
     plt.legend()
     plt.grid(True, alpha=0.3)
 
