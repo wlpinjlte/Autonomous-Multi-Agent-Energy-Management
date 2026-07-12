@@ -31,8 +31,8 @@ class OccDataset(Dataset):
         
         self.occ_idx = occ_idx 
         
-        print(f"Wymiar wejściowy MLP: {self.input_dim}")
-        print(f"Predykcja zajętości z indeksu: {self.occ_idx}")
+        print(f"MLP input dimension: {self.input_dim}")
+        print(f"Occupancy prediction from index: {self.occ_idx}")
 
     def __len__(self):
         return len(self.inputs) - 1
@@ -49,9 +49,9 @@ def train_occupancy_model():
     LEARNING_RATE = 0.001
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Urządzenie docelowe: {device}")
+    print(f"Target device: {device}")
     
-    print(f"Ładowanie danych z data/lstm_dataset.npz dla predyktora zajętości...")
+    print(f"Loading data from data/lstm_dataset.npz for occupancy predictor...")
     data = np.load('data/lstm_dataset.npz', allow_pickle=True)
     states = data['states']
     next_states = data['next_states']
@@ -59,10 +59,10 @@ def train_occupancy_model():
     if 'state_columns' in data:
         state_columns = data['state_columns'].tolist()
         occ_idx = state_columns.index('people_occupant')
-        print(f"Dynamicznie znaleziono 'people_occupant' pod indeksem {occ_idx}")
+        print(f"Dynamically found 'people_occupant' at index {occ_idx}")
     else:
         occ_idx = 14
-        print("Uwaga: brak state_columns w zbiorze. Używam domyślnego indeksu 14.")
+        print("Warning: no state_columns in dataset. Using default index 14.")
     
     # Chronological train/test split (80% / 20%)
     split_idx = int(len(states) * 0.8)
@@ -80,7 +80,7 @@ def train_occupancy_model():
     criterion = nn.MSELoss() 
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
-    print("\nTrwa uczenie modelu zajętości...")
+    print("\nTraining occupancy model...")
     start_time = time.time()
     for epoch in range(EPOCHS):
         model.train()
@@ -94,15 +94,15 @@ def train_occupancy_model():
             optimizer.step()
             total_loss += loss.item()
             
-        print(f"Epoka {epoch+1}/{EPOCHS}, Strata (MSE): {total_loss / len(dataloader):.6f}")
+        print(f"Epoch {epoch+1}/{EPOCHS}, Loss (MSE): {total_loss / len(dataloader):.6f}")
 
-    print(f"Trening zakończony w: {(time.time() - start_time):.2f} s.")
+    print(f"Training completed in: {(time.time() - start_time):.2f} s.")
 
     os.makedirs('data', exist_ok=True)
     torch.save(model.state_dict(), 'data/hvac_occupancy_model.pth')
-    print("\nZapisano predyktor zajętości jako 'data/hvac_occupancy_model.pth'.")
+    print("\nSaved occupancy predictor as 'data/hvac_occupancy_model.pth'.")
 
-    print("\nEwaluacja modelu...")
+    print("\nEvaluating model...")
     model.eval()
     
     # eval_dataloader is already defined using test_dataset
@@ -128,46 +128,65 @@ def train_occupancy_model():
     global_mean = y_true.mean()
     y_mean = np.full_like(y_true, global_mean)
     
-    mae_mlp = mean_absolute_error(y_true, y_mlp)
-    mse_mlp = mean_squared_error(y_true, y_mlp)
+    # Split predictions into T+1 and T+2
+    y_true_t1 = y_true[::2]
+    y_mlp_t1 = y_mlp[::2]
+    y_naive_t1 = y_naive[::2]
+    y_mean_t1 = y_mean[::2]
     
-    mae_naive = mean_absolute_error(y_true, y_naive)
-    mse_naive = mean_squared_error(y_true, y_naive)
+    y_true_t2 = y_true[1::2]
+    y_mlp_t2 = y_mlp[1::2]
+    y_naive_t2 = y_naive[1::2]
+    y_mean_t2 = y_mean[1::2]
     
-    mae_mean = mean_absolute_error(y_true, y_mean)
-    mse_mean = mean_squared_error(y_true, y_mean)
+    mse_mlp_t1 = mean_squared_error(y_true_t1, y_mlp_t1)
+    mse_mlp_t2 = mean_squared_error(y_true_t2, y_mlp_t2)
     
-    print("\n--- PODSUMOWANIE METRYK (sktime) ---")
-    print(f"MLP        - MAE: {mae_mlp:.4f}, MSE: {mse_mlp:.4f}")
-    print(f"Naive Last - MAE: {mae_naive:.4f}, MSE: {mse_naive:.4f}")
-    print(f"Mean       - MAE: {mae_mean:.4f}, MSE: {mse_mean:.4f}")
+    mse_naive_t1 = mean_squared_error(y_true_t1, y_naive_t1)
+    mse_naive_t2 = mean_squared_error(y_true_t2, y_naive_t2)
+    
+    mse_mean_t1 = mean_squared_error(y_true_t1, y_mean_t1)
+    mse_mean_t2 = mean_squared_error(y_true_t2, y_mean_t2)
+    
+    print("\n--- METRICS SUMMARY (sktime) ---")
+    print(f"MLP        - MSE: {mse_mlp_t1:.4f} (T+1), {mse_mlp_t2:.4f} (T+2)")
+    print(f"Naive Last - MSE: {mse_naive_t1:.4f} (T+1), {mse_naive_t2:.4f} (T+2)")
+    print(f"Naive Mean - MSE: {mse_mean_t1:.4f} (T+1), {mse_mean_t2:.4f} (T+2)")
     
     with open('data/occupancy_evaluation_metrics.txt', 'w', encoding='utf-8') as f:
-        f.write("--- METRYKI EWALUACJI ZAJĘTOŚCI ---\n")
-        f.write(f"MLP        - MAE: {mae_mlp:.4f}, MSE: {mse_mlp:.4f}\n")
-        f.write(f"Naive Last - MAE: {mae_naive:.4f}, MSE: {mse_naive:.4f}\n")
-        f.write(f"Mean       - MAE: {mae_mean:.4f}, MSE: {mse_mean:.4f}\n")
+        f.write("--- OCCUPANCY EVALUATION METRICS ---\n")
+        f.write(f"MLP        - MSE: {mse_mlp_t1:.4f} (T+1), {mse_mlp_t2:.4f} (T+2)\n")
+        f.write(f"Naive Last - MSE: {mse_naive_t1:.4f} (T+1), {mse_naive_t2:.4f} (T+2)\n")
+        f.write(f"Naive Mean - MSE: {mse_mean_t1:.4f} (T+1), {mse_mean_t2:.4f} (T+2)\n")
     
-    plot_limit = min(1500, len(y_true))
-    plt.figure(figsize=(14, 6))
+    plot_limit = min(672, len(y_true_t1))
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10))
     
-    plt.plot(y_true[:plot_limit], label="Ground Truth (Rzeczywista Zajętość)", color="black", linewidth=2.5)
-    plt.plot(y_mlp[:plot_limit], label=f"MLP (MAE: {mae_mlp:.3f})", color="royalblue", alpha=0.9, linewidth=1.5)
-    plt.plot(y_naive[:plot_limit], label=f"Naive Last (MAE: {mae_naive:.3f})", color="crimson", linestyle="--", alpha=0.8)
-    plt.plot(y_mean[:plot_limit], label=f"Mean Baseline", color="forestgreen", linestyle=":", alpha=0.8, linewidth=2)
+    # Subplot 1: T+1
+    ax1.plot(y_true_t1[:plot_limit], label="Wartość rzeczywista (T+1)", color="black", linewidth=2.5)
+    ax1.plot(y_mlp_t1[:plot_limit], label=f"MLP T+1 (MSE: {mse_mlp_t1:.3f})", color="royalblue", alpha=0.9, linewidth=1.5)
+    ax1.plot(y_naive_t1[:plot_limit], label=f"Naiwne (ostatnia wartość) T+1 (MSE: {mse_naive_t1:.3f})", color="crimson", linestyle="--", alpha=0.8)
+    ax1.set_title(f"Predykcja 1 krok w przód (T+1) - Pierwsze {plot_limit} kroków (ok. {plot_limit/96:.1f} dni)")
+    ax1.set_ylabel("Znormalizowana liczba osób")
+    ax1.legend(loc="upper right")
+    ax1.grid(True, alpha=0.3)
     
-    plt.title(f"Porównanie predykcji zajętości: MLP vs Baseline (Pierwsze {plot_limit} kroków)")
-    plt.xlabel("Kroki czasowe")
-    plt.ylabel("Zajętość")
-    plt.legend(loc="upper right")
-    plt.grid(True, alpha=0.3)
+    # Subplot 2: T+2
+    ax2.plot(y_true_t2[:plot_limit], label="Wartość rzeczywista (T+2)", color="black", linewidth=2.5)
+    ax2.plot(y_mlp_t2[:plot_limit], label=f"MLP T+2 (MSE: {mse_mlp_t2:.3f})", color="darkorange", alpha=0.9, linewidth=1.5)
+    ax2.plot(y_naive_t2[:plot_limit], label=f"Naiwne (ostatnia wartość) T+2 (MSE: {mse_naive_t2:.3f})", color="crimson", linestyle="--", alpha=0.8)
+    ax2.set_title(f"Predykcja 2 kroki w przód (T+2) - Pierwsze {plot_limit} kroków")
+    ax2.set_xlabel("Kroki symulacji (1 krok = 15 minut)")
+    ax2.set_ylabel("Znormalizowana liczba osób")
+    ax2.legend(loc="upper right")
+    ax2.grid(True, alpha=0.3)
     
     plt.tight_layout()
     plt.savefig('data/occupancy_evaluation_plot.png', dpi=300)
     plt.close()
     
-    print("\n[✔] Zapisano raport 'data/occupancy_evaluation_metrics.txt'.")
-    print("[✔] Zapisano wykres 'data/occupancy_evaluation_plot.png'.\n")
+    print("\n[✔] Saved report 'data/occupancy_evaluation_metrics.txt'.")
+    print("[✔] Saved plot 'data/occupancy_evaluation_plot.png'.\n")
 
 if __name__ == "__main__":
     train_occupancy_model()

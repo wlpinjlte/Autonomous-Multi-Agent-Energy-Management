@@ -43,7 +43,7 @@ class OccupancyNoiseWrapper(gym.Wrapper):
         day = info.get('day', 1)
         month = info.get('month', 1)
         
-        # Pobieramy izolowany generator liczb losowych dla danego środowiska
+        # Get isolated random number generator for given environment
         rng = self.env.np_random
         
         import datetime
@@ -128,7 +128,12 @@ class DualPredictorObservationWrapper(gym.Wrapper):
 
     def _get_augmented_obs(self, obs):
         seq = list(self.history)
-        seq.append(np.concatenate((obs, np.zeros(self.env.action_space.shape))))
+        if len(seq) > 0:
+            last_action = seq[-1][obs.shape[0]:]
+        else:
+            last_action = (self.env.action_space.low + self.env.action_space.high) / 2.0
+            
+        seq.append(np.concatenate((obs, last_action)))
         x_lstm = torch.tensor(np.array(seq), dtype=torch.float32).unsqueeze(0).to(self.device)
         x_occ = torch.tensor(obs, dtype=torch.float32).unsqueeze(0).to(self.device)
         
@@ -142,8 +147,9 @@ class DualPredictorObservationWrapper(gym.Wrapper):
         obs, info = self.env.reset(**kwargs)
         self.history.clear()
         
+        neutral_action = (self.env.action_space.low + self.env.action_space.high) / 2.0
         for _ in range(self.seq_length - 1):
-            self.history.append(np.concatenate((obs, np.zeros(self.env.action_space.shape))))
+            self.history.append(np.concatenate((obs, neutral_action)))
             
         self.current_obs = obs
         return self._get_augmented_obs(obs), info
@@ -171,7 +177,7 @@ class CustomRewardWrapper(gym.Wrapper):
         self.w_energy = float(os.getenv("WEIGHT_ENERGY", "0.80"))
         self.w_comfort_now = float(os.getenv("WEIGHT_COMFORT_NOW", "0.05"))
         self.w_comfort_future = float(os.getenv("WEIGHT_COMFORT_FUTURE", "0.15"))
-        print(f"[REWARD WRAPPER] Uruchomiono z wagami -> Energia: {self.w_energy}, Komfort: {self.w_comfort_now}, Przyszlosc: {self.w_comfort_future}")
+        print(f"[REWARD WRAPPER] Started with weights -> Energy: {self.w_energy}, Comfort: {self.w_comfort_now}, Future: {self.w_comfort_future}")
 
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)
@@ -184,37 +190,34 @@ class CustomRewardWrapper(gym.Wrapper):
         lambda_energy = 1e-4 
         energy_penalty = power_w * lambda_energy
 
-        # 2. Odczyt nieznormalizowanych wartości z uwzględnieniem predyktorów LSTM/MLP
+        # 2. Read unnormalized values taking into account LSTM/MLP predictors
         try:
             obs_rms = self.get_wrapper_attr('obs_rms')
             epsilon = self.get_wrapper_attr('epsilon')
+            
+            # Unnormalize temperature
             mean_temp = obs_rms.mean[self.temp_idx]
             std_temp = np.sqrt(obs_rms.var[self.temp_idx] + epsilon)
-            
             current_temp = float(obs[self.temp_idx]) * std_temp + mean_temp
             future_temp_t1 = float(obs[-2]) * std_temp + mean_temp
             future_temp_t2 = float(obs[-1]) * std_temp + mean_temp
+            
+            # Unnormalize occupancy
+            mean_occ = obs_rms.mean[self.occ_idx]
+            std_occ = np.sqrt(obs_rms.var[self.occ_idx] + epsilon)
+            current_occ = float(obs[self.occ_idx]) * std_occ + mean_occ
+            future_occ_t1 = float(obs[-4]) * std_occ + mean_occ
+            future_occ_t2 = float(obs[-3]) * std_occ + mean_occ
         except AttributeError:
             current_temp = float(obs[self.temp_idx])
             future_temp_t1 = float(obs[-2])
             future_temp_t2 = float(obs[-1])
             
-        true_occ_unnorm = info.get('true_occupancy_unnorm', None)
-        if true_occ_unnorm is not None:
-            try:
-                obs_rms = self.get_wrapper_attr('obs_rms')
-                epsilon = self.get_wrapper_attr('epsilon')
-                true_occ_norm = (true_occ_unnorm - obs_rms.mean[self.occ_idx]) / np.sqrt(obs_rms.var[self.occ_idx] + epsilon)
-                current_occ_weight = float(np.clip((true_occ_norm + 1.0) / 2.0, 0.0, 1.0))
-            except AttributeError:
-                current_occ_weight = 1.0 if true_occ_unnorm > 0 else 0.0
-        else:
-            current_occ_weight = float(np.clip((obs[self.occ_idx] + 1.0) / 2.0, 0.0, 1.0))
-            
-        pred_occ_t1_weight = float(np.clip((obs[-4] + 1.0) / 2.0, 0.0, 1.0))
-        pred_occ_t2_weight = float(np.clip((obs[-3] + 1.0) / 2.0, 0.0, 1.0))
+            current_occ = float(obs[self.occ_idx])
+            future_occ_t1 = float(obs[-4])
+            future_occ_t2 = float(obs[-3])
         
-        # 3. Zwiększenie rygoru temperaturowego
+        # 3. Increase temperature strictness
         target_temp = 23.5
         deadband = 0.5
         
@@ -222,29 +225,20 @@ class CustomRewardWrapper(gym.Wrapper):
         diff_t1 = future_temp_t1 - target_temp
         diff_t2 = future_temp_t2 - target_temp
         
-        # Opcja A: Asymetryczna kara
-        if current_occ_weight > 0.0:
-            delta_now = float(max(0.0, abs(diff_now) - deadband))
-        else:
-            delta_now = float(max(0.0, abs(diff_now) - deadband)) if diff_now < 0 else 0.0
-            
-        if pred_occ_t1_weight > 0.0:
-            delta_t1 = float(max(0.0, abs(diff_t1) - deadband))
-        else:
-            delta_t1 = float(max(0.0, abs(diff_t1) - deadband)) if diff_t1 < 0 else 0.0
-            
-        if pred_occ_t2_weight > 0.0:
-            delta_t2 = float(max(0.0, abs(diff_t2) - deadband))
-        else:
-            delta_t2 = float(max(0.0, abs(diff_t2) - deadband)) if diff_t2 < 0 else 0.0
+        # Calculate comfort weights based on actual number of people (binary scaling 0 or 1)
+        current_occ_weight = 1.0 if current_occ > 0.0 else 0.0
+        pred_occ_t1_weight = 1.0 if future_occ_t1 > 0.0 else 0.0
+        pred_occ_t2_weight = 1.0 if future_occ_t2 > 0.0 else 0.0
+
+        delta_now = float(max(0.0, abs(diff_now) - deadband)) 
+        delta_t1 = float(max(0.0, abs(diff_t1) - deadband))
+        delta_t2 = float(max(0.0, abs(diff_t2) - deadband))
         
-        # Zdejmujemy w_occ, bo logika jest już zawarta wyżej
-        comfort_now_penalty = delta_now
-        comfort_future_penalty_t1 = delta_t1
-        comfort_future_penalty_t2 = delta_t2
+        comfort_now_penalty = delta_now * current_occ_weight
+        comfort_future_penalty_t1 = delta_t1 * pred_occ_t1_weight
+        comfort_future_penalty_t2 = delta_t2 * pred_occ_t2_weight
         comfort_future_penalty = (comfort_future_penalty_t1 + comfort_future_penalty_t2) / 2.0
 
-        # 5. Balans Wag (Ze środowiska)
         custom_reward = - (
             self.w_energy * energy_penalty + 
             self.w_comfort_now * comfort_now_penalty + 
@@ -259,7 +253,22 @@ class CustomRewardWrapper(gym.Wrapper):
 
 def make_env(env_id, rank, seed=0):
     def _init():
-        env = gym.make(env_id)
+        # Changing zone from ZONE-1/SPACE1-1 to SPACE5-1
+        temp_env = gym.make(env_id)
+        try:
+            default_vars = temp_env.get_wrapper_attr('variables')
+            default_acts = temp_env.get_wrapper_attr('actuators')
+            default_meters = temp_env.get_wrapper_attr('meters')
+        except AttributeError:
+            default_vars = temp_env.unwrapped.variables
+            default_acts = temp_env.unwrapped.actuators
+            default_meters = temp_env.unwrapped.meters
+        temp_env.close()
+
+        new_vars = {k: (v[0], str(v[1]).replace('SPACE1-1', 'SPACE5-1').replace('ZONE-1', 'SPACE5-1')) if isinstance(v, tuple) and len(v) == 2 else v for k, v in default_vars.items()}
+        new_acts = {k: (v[0], v[1], str(v[2]).replace('SPACE1-1', 'SPACE5-1').replace('ZONE-1', 'SPACE5-1')) if isinstance(v, tuple) and len(v) == 3 else v for k, v in default_acts.items()}
+
+        env = gym.make(env_id, variables=new_vars, actuators=new_acts, meters=default_meters)
         env = DatetimeWrapper(env)
         env = OccupancyNoiseWrapper(env, noise_std=2.0)
         env = NormalizeObservation(env)
@@ -269,10 +278,10 @@ def make_env(env_id, rank, seed=0):
             obs_rms = env.get_wrapper_attr('obs_rms')
             obs_rms.mean = data['obs_mean']
             obs_rms.var = data['obs_var']
-            obs_rms.count = data['obs_count']
+            obs_rms.count = 1e8
         except Exception as e:
             print(f"[{rank}] Could not load normalization calibration: {e}")
-            
+        
         new_obs_space = Box(low=env.observation_space.low, high=env.observation_space.high, dtype=np.float32)
         env = TransformObservation(env, func=lambda obs: np.array(obs, dtype=np.float32), observation_space=new_obs_space)
 
@@ -286,22 +295,21 @@ def make_env(env_id, rank, seed=0):
 def main():
     env_id = 'Eplus-5zone-hot-continuous-stochastic-v1'
     num_cpu = 6
-    print(f"Inicjalizacja {num_cpu} równoległych środowisk...")
+    print(f"Initializing {num_cpu} parallel environments...")
     
-    # Check env on a single instance first
     dummy_env = make_env(env_id, 0)()
     check_env(dummy_env)
-    print("Architektura pozytywnie zweryfikowana.")
+    print("Architecture positively verified.")
     
     env = SubprocVecEnv([make_env(env_id, i) for i in range(num_cpu)])
 
-    print("Uruchamiam wielowątkowy trening SAC.")
+    print("Running multi-threaded SAC training.")
 
     model = SAC("MlpPolicy", env, verbose=1, tensorboard_log="./sac_hvac_tensorboard/")
     model.learn(total_timesteps=350000, log_interval=4)
 
     model.save("data/sac_hvac_agent_with_lstm")
-    print("Trening zakończony!")
+    print("Training completed!")
 
 if __name__ == "__main__":
     main()

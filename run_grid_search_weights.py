@@ -11,11 +11,11 @@ def run_docker(service, env_vars):
     cmd = ["docker", "compose", "-f", f"{service}/docker-compose.yml", "up", "--build", "--abort-on-container-exit"]
     print(f"Running {' '.join(cmd)}...")
     
-    # Tworzymy izolowane środowisko TYLKO dla tego procesu (nie nadpisuje globalnego env!)
+    # Create an isolated environment ONLY for this process (doesn't override global env!)
     isolated_env = os.environ.copy()
     isolated_env.update(env_vars)
     
-    # Zabezpieczenie przed oczekiwaniem na input z klawiatury (DEVNULL)
+    # Protection against waiting for keyboard input (DEVNULL)
     subprocess.run(cmd, cwd=CWD, check=True, env=isolated_env, stdin=subprocess.DEVNULL)
 
 def read_metrics():
@@ -23,34 +23,34 @@ def read_metrics():
     with open(metrics_file, 'r', encoding='utf-8') as f:
         content = f.read()
     
-    energy_match = re.search(r'Zysk \(SAC vs Occupancy\):\s*(-?\d+\.\d+)%', content)
+    energy_match = re.search(r'Gain \(SAC vs Occupancy\):\s*(-?\d+\.\d+)%', content)
     energy_saving = energy_match.group(1) if energy_match else "N/A"
     
-    energy_abs_match = re.search(r'Skumulowany koszt energii.*?\n\s*SAC Agent:\s*(\d+\.\d+)', content, re.DOTALL)
+    energy_abs_match = re.search(r'Cumulative energy cost.*?\n\s*SAC Agent:\s*(\d+\.\d+)', content, re.DOTALL)
     energy_abs = energy_abs_match.group(1) if energy_abs_match else "N/A"
     
-    comfort_abs_match = re.search(r'Skumulowana kara za dyskomfort.*?\n\s*SAC Agent:\s*(\d+\.\d+)', content, re.DOTALL)
+    comfort_abs_match = re.search(r'Cumulative thermal discomfort penalty.*?\n\s*SAC Agent:\s*(\d+\.\d+)', content, re.DOTALL)
     comfort_abs = comfort_abs_match.group(1) if comfort_abs_match else "N/A"
     
-    # Znalezienie procentowego "Zysk (SAC vs Occupancy)" dla komfortu
-    comfort_pct_match = re.search(r'Skumulowana kara za dyskomfort.*?\n.*?\n.*?\n.*?\n\s*Zysk \(SAC vs Occupancy\):\s*(-?\d+\.\d+)%', content, re.DOTALL)
+    # Znalezienie procentowego zysku dla komfortu
+    comfort_pct_match = re.search(r'Cumulative thermal discomfort penalty.*?\n.*?\n.*?\n.*?\n\s*Gain \(SAC vs Occupancy\):\s*(-?\d+\.\d+)%', content, re.DOTALL)
     comfort_pct = comfort_pct_match.group(1) if comfort_pct_match else "N/A"
     
     return energy_saving, energy_abs, comfort_abs, comfort_pct, content
 
-def run_evaluations(candidates, mode_name):
-    out_file_detailed = os.path.join(CWD, "data", "grid_search_results_detailed.txt")
-    out_file_short = os.path.join(CWD, "data", "grid_search_results_short.txt")
+def run_evaluations(candidates, mode_name, file_prefix):
+    out_file_detailed = os.path.join(CWD, "data", f"grid_search_{file_prefix}_results_detailed.txt")
+    out_file_short = os.path.join(CWD, "data", f"grid_search_{file_prefix}_results_short.txt")
     
-    # Używamy dopisywania (a), by ewentualne przerwania nie kasowały poprzednich sesji
+    # Use append mode (a) so interruptions don't delete previous sessions
     with open(out_file_detailed, "a", encoding="utf-8") as f:
-        f.write(f"\n--- Wyniki {mode_name} (Szczegółowe) ---\n")
+        f.write(f"\n--- {mode_name} Results (Detailed) ---\n")
     with open(out_file_short, "a", encoding="utf-8") as f:
-        f.write(f"\n--- Wyniki {mode_name} (Skrócone) ---\n")
+        f.write(f"\n--- {mode_name} Results (Short) ---\n")
         
-    print(f"--- ROZPOCZĘCIE {mode_name.upper()} ---")
+    print(f"--- STARTING {mode_name.upper()} ---")
     for w_eng, w_comf_now, w_fut in candidates:
-        print(f"\n[Test] Wagi -> Energia: {w_eng:.2f}, Komfort_Now: {w_comf_now:.2f}, Komfort_Future: {w_fut:.2f}")
+        print(f"\n[Test] Weights -> Energy: {w_eng:.2f}, Comfort_Now: {w_comf_now:.2f}, Comfort_Future: {w_fut:.2f}")
         
         env_vars = {
             "WEIGHT_ENERGY": f"{w_eng:.2f}",
@@ -58,76 +58,76 @@ def run_evaluations(candidates, mode_name):
             "WEIGHT_COMFORT_FUTURE": f"{w_fut:.2f}"
         }
         
-        print("Trwa trening wielowątkowy...")
+        print("Running multi-agent training...")
         run_docker("decision_agent", env_vars)
         
-        print("Trwa ewaluacja...")
+        print("Running evaluation...")
         run_docker("evaluate_agent", env_vars)
         
         energy_saving, energy_abs, comfort_abs, comfort_pct, raw_content = read_metrics()
         
-        header = f"- Wagi ({w_eng:.2f}, {w_comf_now:.2f}, {w_fut:.2f}) -> Energia: {energy_abs} jedn. (Zysk: {energy_saving}%), Komfort: {comfort_abs} jedn. ({comfort_pct}%)"
+        header = f"- Weights ({w_eng:.2f}, {w_comf_now:.2f}, {w_fut:.2f}) -> Energy: {energy_abs} units (Gain: {energy_saving}%), Comfort: {comfort_abs} units ({comfort_pct}%)"
         indented_content = "\n".join([f"    {line}" for line in raw_content.strip().split("\n")])
         result_detailed = f"{header}\n{indented_content}\n"
         
-        print(f"Wynik dla testu:\n{header}")
+        print(f"Result for test:\n{header}")
         
-        # Zapisz wersję szczegółową
+        # Save detailed version
         with open(out_file_detailed, "a", encoding="utf-8") as f:
             f.write(result_detailed + "\n")
             
-        # Zapisz wersję skróconą
+        # Save short version
         with open(out_file_short, "a", encoding="utf-8") as f:
             f.write(header + "\n")
     
-    print(f"\n--- ZAKOŃCZONO {mode_name.upper()}. Wyniki zapisane w data/grid_search_results_*.txt ---")
+    print(f"\n--- {mode_name.upper()} FINISHED. Results saved in data/grid_search_{file_prefix}_results_*.txt ---")
 
 def main():
-    parser = argparse.ArgumentParser(description="Optymalizacja hiperparametrów agenta (Grid Search / Random Search)")
+    parser = argparse.ArgumentParser(description="Agent hyperparameters optimization (Grid Search / Random Search)")
     subparsers = parser.add_subparsers(dest="mode", required=True)
     
-    # Tryb Coarse
-    parser_coarse = subparsers.add_parser("coarse", help="Gruboziarnisty grid search z wybranymi krokami dla poszczególnych wag")
-    parser_coarse.add_argument("--step-eng", type=float, default=0.1, help="Krok poszukiwań dla wagi energii (np. 0.1)")
-    parser_coarse.add_argument("--step-comf", type=float, default=0.1, help="Krok poszukiwań dla wagi komfortu bieżącego (np. 0.1)")
+    # Coarse mode
+    parser_coarse = subparsers.add_parser("coarse", help="Coarse grid search with specific steps for each weight")
+    parser_coarse.add_argument("--min-eng", type=float, default=0.0, help="Minimum energy weight")
+    parser_coarse.add_argument("--max-eng", type=float, default=1.0, help="Maximum energy weight")
+    parser_coarse.add_argument("--step-eng", type=float, default=0.1, help="Search step for energy weight (e.g. 0.1)")
+    parser_coarse.add_argument("--min-comf", type=float, default=0.0, help="Minimum current comfort weight")
+    parser_coarse.add_argument("--max-comf", type=float, default=1.0, help="Maximum current comfort weight")
+    parser_coarse.add_argument("--step-comf", type=float, default=0.1, help="Search step for current comfort weight (e.g. 0.1)")
     
-    # Tryb Random
-    parser_random = subparsers.add_parser("random", help="Losowe przeszukiwanie w konkretnym zakresie okna optymalnego")
-    parser_random.add_argument("--min-eng", type=float, required=True, help="Minimalna waga energii")
-    parser_random.add_argument("--max-eng", type=float, required=True, help="Maksymalna waga energii")
-    parser_random.add_argument("--min-comf", type=float, required=True, help="Minimalna waga bieżącego komfortu")
-    parser_random.add_argument("--max-comf", type=float, required=True, help="Maksymalna waga bieżącego komfortu")
-    parser_random.add_argument("--trials", type=int, default=10, help="Liczba losowań")
+    # Random mode
+    parser_random = subparsers.add_parser("random", help="Random search in a specific range of the optimal window")
+    parser_random.add_argument("--min-eng", type=float, required=True, help="Minimum energy weight")
+    parser_random.add_argument("--max-eng", type=float, required=True, help="Maximum energy weight")
+    parser_random.add_argument("--min-comf", type=float, required=True, help="Minimum current comfort weight")
+    parser_random.add_argument("--max-comf", type=float, required=True, help="Maximum current comfort weight")
+    parser_random.add_argument("--trials", type=int, default=10, help="Number of trials")
     
     args = parser.parse_args()
     
     candidates = []
     
     if args.mode == "coarse":
-        steps_eng = np.arange(0.0, 1.01, args.step_eng)
-        steps_comf = np.arange(0.0, 1.01, args.step_comf)
+        steps_eng = np.arange(args.min_eng, args.max_eng + 1e-5, args.step_eng)
+        steps_comf = np.arange(args.min_comf, args.max_comf + 1e-5, args.step_comf)
         for w_eng in steps_eng:
             for w_comf in steps_comf:
                 if w_eng + w_comf <= 1.0:
                     w_fut = round(1.0 - w_eng - w_comf, 2)
                     candidates.append((round(w_eng, 2), round(w_comf, 2), w_fut))
-        print(f"Wygenerowano {len(candidates)} konfiguracji dla Coarse Grid Search (krok eng: {args.step_eng}, krok comf: {args.step_comf}).")
-        run_evaluations(candidates, "Coarse Grid Search")
+        print(f"Generated {len(candidates)} configurations for Coarse Grid Search (eng step: {args.step_eng}, comf step: {args.step_comf}).")
+        run_evaluations(candidates, "Coarse Grid Search", "coarse")
         
     elif args.mode == "random":
-        for _ in range(args.trials):
+        while len(candidates) < args.trials:
             w_eng = round(random.uniform(args.min_eng, args.max_eng), 2)
             w_comf = round(random.uniform(args.min_comf, args.max_comf), 2)
             w_fut = round(1.0 - w_eng - w_comf, 2)
-            if w_fut >= 0:
+            if w_fut > 0.0:
                 candidates.append((w_eng, w_comf, w_fut))
-            else:
-                # Bezpiecznik jeśli w_eng i w_comf przekroczą 1.0
-                w_comf_adjusted = round(1.0 - w_eng, 2)
-                candidates.append((w_eng, w_comf_adjusted, 0.0))
         
-        print(f"Wylosowano {args.trials} konfiguracji w zadanym zakresie.")
-        run_evaluations(candidates, "Random Search (Fine tuning)")
+        print(f"Sampled {args.trials} configurations in the specified range.")
+        run_evaluations(candidates, "Random Search (Fine tuning)", "random")
 
 if __name__ == "__main__":
     main()

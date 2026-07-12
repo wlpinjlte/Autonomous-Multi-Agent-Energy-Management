@@ -68,13 +68,41 @@ class OccupancyNoiseWrapper(gym.Wrapper):
         noisy_obs[self.occ_idx] = max(0.0, float(noisy_obs[self.occ_idx] + total_noise))
         return noisy_obs
 
+class RecordRawObsWrapper(gym.Wrapper):
+    def step(self, action):
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        info['raw_obs'] = obs.copy()
+        return obs, reward, terminated, truncated, info
+
+    def reset(self, **kwargs):
+        obs, info = self.env.reset(**kwargs)
+        info['raw_obs'] = obs.copy()
+        return obs, info
+
 
 env_id = 'Eplus-5zone-hot-continuous-stochastic-v1'
-env = gym.make(env_id)
+
+# Changing zone from ZONE-1/SPACE1-1 (side zone) to SPACE5-1 (middle zone)
+temp_env = gym.make(env_id)
+try:
+    default_vars = temp_env.get_wrapper_attr('variables')
+    default_acts = temp_env.get_wrapper_attr('actuators')
+    default_meters = temp_env.get_wrapper_attr('meters')
+except AttributeError:
+    default_vars = temp_env.unwrapped.variables
+    default_acts = temp_env.unwrapped.actuators
+    default_meters = temp_env.unwrapped.meters
+temp_env.close()
+
+new_vars = {k: (v[0], str(v[1]).replace('SPACE1-1', 'SPACE5-1').replace('ZONE-1', 'SPACE5-1')) if isinstance(v, tuple) and len(v) == 2 else v for k, v in default_vars.items()}
+new_acts = {k: (v[0], v[1], str(v[2]).replace('SPACE1-1', 'SPACE5-1').replace('ZONE-1', 'SPACE5-1')) if isinstance(v, tuple) and len(v) == 3 else v for k, v in default_acts.items()}
+
+env = gym.make(env_id, variables=new_vars, actuators=new_acts, meters=default_meters)
 
 
 env = DatetimeWrapper(env)
-env = OccupancyNoiseWrapper(env, noise_std=2.0) # Zaszumienie przed normalizacją
+env = OccupancyNoiseWrapper(env, noise_std=2.0) # Noise before normalization
+env = RecordRawObsWrapper(env)
 # rescal to [-1, 1]
 env = NormalizeObservation(env)
 
@@ -100,6 +128,7 @@ dataset_next_states = []
 
 for ep in range(num_episodes):
     obs, info = env.reset()
+    raw_obs = info['raw_obs']
     terminated = False
     truncated = False
     
@@ -108,12 +137,13 @@ for ep in range(num_episodes):
         action = env.action_space.sample()
         
         next_obs, reward, terminated, truncated, info = env.step(action)
+        raw_next_obs = info['raw_obs']
         
-        dataset_states.append(obs)
+        dataset_states.append(raw_obs)
         dataset_actions.append(action)
-        dataset_next_states.append(next_obs)
+        dataset_next_states.append(raw_next_obs)
         
-        obs = next_obs
+        raw_obs = raw_next_obs
         step_count += 1
         
         if step_count % 5000 == 0:
@@ -121,12 +151,25 @@ for ep in range(num_episodes):
 
     print(f"Finished episodes {ep + 1}")
 
-states_array = np.array(dataset_states)
-actions_array = np.array(dataset_actions)
-next_states_array = np.array(dataset_next_states)
+states_array = np.array(dataset_states, dtype=np.float32)
+actions_array = np.array(dataset_actions, dtype=np.float32)
+next_states_array = np.array(dataset_next_states, dtype=np.float32)
 
 state_columns = env.get_wrapper_attr('observation_variables')
 action_columns = env.get_wrapper_attr('action_variables')
+
+obs_rms = env.get_wrapper_attr('obs_rms')
+obs_mean = obs_rms.mean
+obs_var = obs_rms.var
+epsilon = 1e-8
+try:
+    epsilon = env.get_wrapper_attr('epsilon')
+except AttributeError:
+    pass
+
+# Statically normalize the collected raw data to ensure consistency across the dataset
+states_array = (states_array - obs_mean) / np.sqrt(obs_var + epsilon)
+next_states_array = (next_states_array - obs_mean) / np.sqrt(obs_var + epsilon)
 
 np.savez('/app/data/lstm_dataset.npz', 
          states=states_array, 
@@ -134,9 +177,9 @@ np.savez('/app/data/lstm_dataset.npz',
          next_states=next_states_array,
          state_columns=state_columns,
          action_columns=action_columns,
-         obs_mean=env.get_wrapper_attr('obs_rms').mean,
-         obs_var=env.get_wrapper_attr('obs_rms').var,
-         obs_count=env.get_wrapper_attr('obs_rms').count)
+         obs_mean=obs_mean,
+         obs_var=obs_var,
+         obs_count=obs_rms.count)
 print("Saved data to lstm_dataset.npz")
 
 env.close()
